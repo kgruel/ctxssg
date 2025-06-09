@@ -5,149 +5,314 @@
 [![Tests](https://github.com/kgruel/ctxssg/actions/workflows/test.yml/badge.svg)](https://github.com/kgruel/ctxssg/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/kgruel/ctxssg/blob/master/LICENSE)
 
-A pandoc-based static site generator for creating contextual documentation sites.
+A modern, pandoc-based static site generator designed for technical documentation and content that requires structured output in multiple formats.
 
 ## Features
 
-- **Pandoc-powered**: Uses pandoc for powerful document conversion with syntax highlighting
-- **YAML frontmatter**: Support for metadata in your Markdown files
-- **Jinja2 templates**: Flexible templating system for layouts
-- **Live reload**: Development server with automatic rebuilding on file changes
-- **Simple CLI**: Easy-to-use command-line interface
-- **Fast**: Minimal dependencies and efficient build process
+### Core Capabilities
+- **Multi-format Output**: Generate HTML, XML, JSON, and plain text from single source files
+- **Pandoc Integration**: Leverage pandoc's powerful document conversion with syntax highlighting
+- **Template-driven Architecture**: Jinja2-based templating with customizable output formats
+- **TOML Configuration**: Modern configuration with format-specific options
+- **Live Development Server**: Hot-reload development environment with file watching
+
+### Technical Benefits
+- **Structured Content Processing**: Parse markdown into semantic sections for API consumption
+- **Type-safe Configuration**: Comprehensive configuration validation and error handling
+- **Dependency Management**: Built-in system dependency checking and diagnostics
+- **Resource Management**: Smart package resource loading with fallback mechanisms
+- **Zero-configuration Defaults**: Sensible defaults with full customization capability
 
 ## Installation
 
-Install this tool using `pip`:
+### Prerequisites
+- Python 3.10+
+- [Pandoc](https://pandoc.org/installing.html) (required for document conversion)
+
+### Install via pip
 ```bash
 pip install ctxssg
 ```
 
+### Verify Installation
+```bash
+ctxssg doctor  # Check system dependencies and configuration
+```
+
 ## Quick Start
 
-1. **Initialize a new site:**
-   ```bash
-   ctxssg init my-site --title "My Documentation"
-   cd my-site
-   ```
-
-2. **Create content:**
-   ```bash
-   ctxssg new "Getting Started" --type post
-   ctxssg new "About" --type page
-   ```
-
-3. **Build the site:**
-   ```bash
-   ctxssg build
-   ```
-
-4. **Serve locally with live reload:**
-   ```bash
-   ctxssg serve --watch
-   ```
-
-## Project Structure
-
+### 1. Initialize Site
+```bash
+ctxssg init my-docs --title "Technical Documentation"
+cd my-docs
 ```
-my-site/
-├── config.yaml          # Site configuration
-├── content/            # Your markdown content
-│   ├── posts/         # Blog posts
-│   └── *.md           # Pages
-├── templates/          # Jinja2 templates
-│   ├── base.html      # Base template
-│   ├── default.html   # Default page template
-│   ├── index.html     # Homepage template
-│   └── post.html      # Blog post template
-├── static/            # Static assets
+
+### 2. Configure Output Formats
+Edit `config.toml` to enable multiple formats:
+```toml
+[build]
+output_formats = ["html", "xml", "json", "plain"]
+
+[formats.json]
+pretty_print = true
+include_metadata = true
+
+[formats.xml]
+include_namespaces = false
+```
+
+### 3. Create Content
+```bash
+ctxssg new "API Reference" --type page
+ctxssg new "Getting Started" --type post
+```
+
+### 4. Build and Serve
+```bash
+ctxssg build    # Generate all configured formats
+ctxssg serve    # Development server with hot-reload
+```
+
+## Architecture
+
+### Project Structure
+```
+my-docs/
+├── config.toml              # TOML configuration
+├── content/                 # Source content
+│   ├── posts/              # Blog posts/articles
+│   │   └── *.md
+│   └── *.md                # Static pages
+├── templates/               # Jinja2 templates
+│   ├── base.html           # Base HTML template
+│   ├── default.html        # Default page template
+│   ├── index.html          # Homepage template
+│   ├── post.html           # Post template
+│   └── formats/            # Output format templates
+│       ├── document.xml.j2 # XML output template
+│       ├── document.json.j2# JSON output template
+│       └── document.txt.j2 # Plain text template
+├── static/                  # Static assets
 │   ├── css/
 │   └── js/
-└── _site/             # Generated site (git-ignored)
+└── _site/                   # Generated output
+    ├── *.html              # HTML files
+    ├── *.xml               # XML files
+    ├── *.json              # JSON files
+    └── *.txt               # Plain text files
 ```
 
-## Content Format
-
-Create content files in Markdown with YAML frontmatter:
+### Content Format
+Content files use Markdown with YAML frontmatter:
 
 ```markdown
 ---
-title: My First Post
-date: 2024-01-01
-layout: post
-tags: [tutorial, getting-started]
+title: API Authentication
+date: 2024-01-15
+layout: default
+tags: [api, auth, security]
 ---
 
-# Welcome
+# Authentication
 
-Your content goes here...
+API authentication is handled via...
+
+## OAuth 2.0 Flow
+
+1. Obtain authorization code
+2. Exchange for access token
+3. Include token in requests
 ```
 
 ## Configuration
 
-Edit `config.yaml` to customize your site:
+### Basic Configuration (`config.toml`)
+```toml
+[site]
+title = "Technical Documentation"
+url = "https://docs.example.com"
+description = "Comprehensive API and development documentation"
+author = "Development Team"
 
-```yaml
-title: My Site
-url: https://example.com
-description: A static site built with ctxssg
-author: Your Name
-output_dir: _site
+[build]
+output_dir = "_site"
+output_formats = ["html", "xml", "json", "plain"]
+
+[formats.json]
+pretty_print = true
+include_metadata = true
+
+[formats.xml]
+include_namespaces = false
+
+[formats.plain]
+include_metadata = true
+wrap_width = 80
 ```
 
-## Commands
+### Template Customization
+Override default templates by creating files in your `templates/` directory. Templates use Jinja2 syntax with access to:
 
-- `ctxssg init [path]` - Initialize a new site
-- `ctxssg build` - Build the static site
-- `ctxssg serve` - Serve the site locally
-- `ctxssg new [title]` - Create a new post or page
-- `ctxssg --help` - Show help for any command
+- `site` - Site configuration
+- `page` - Current page data
+- `content` - Structured content data (for format templates)
+- `metadata` - Page metadata
 
-### Command Options
+### Format Templates
+Create custom output formats by modifying templates in `templates/formats/`:
 
-**init**
-- `--title, -t` - Set the site title (default: "My Site")
+- `document.xml.j2` - XML output structure
+- `document.json.j2` - JSON API response format
+- `document.txt.j2` - Plain text documentation
 
-**build**
-- `--watch, -w` - Watch for changes and rebuild automatically
+## CLI Commands
 
-**serve**
-- `--port, -p` - Port to serve on (default: 8000)
-- `--watch, -w` - Watch for changes and rebuild
+### Site Management
+```bash
+ctxssg init [path] --title "Site Title"     # Initialize new site
+ctxssg build                                # Build all configured formats
+ctxssg serve --port 8000 --watch           # Development server
+ctxssg doctor                               # System diagnostics
+```
 
-**new**
-- `--type, -t` - Content type: 'post' or 'page' (default: 'post')
+### Content Creation
+```bash
+ctxssg new "Page Title" --type page         # Create new page
+ctxssg new "Post Title" --type post         # Create new post
+ctxssg convert input.md --format xml        # Convert single file
+```
+
+### Development Commands
+```bash
+ctxssg serve --watch                        # Hot-reload development
+ctxssg build --watch                        # Continuous building
+```
+
+## Output Formats
+
+### HTML
+Standard web output with responsive design, syntax highlighting, and navigation.
+
+### XML
+Structured XML output suitable for API consumption:
+```xml
+<document>
+  <metadata>
+    <title>API Reference</title>
+    <date>2024-01-15</date>
+  </metadata>
+  <content>
+    <section id="authentication" level="1">
+      <title>Authentication</title>
+      <content>...</content>
+    </section>
+  </content>
+</document>
+```
+
+### JSON
+API-friendly JSON structure:
+```json
+{
+  "metadata": {
+    "title": "API Reference",
+    "date": "2024-01-15"
+  },
+  "content": {
+    "sections": [
+      {
+        "id": "authentication",
+        "level": 1,
+        "title": "Authentication",
+        "content": [...]
+      }
+    ]
+  }
+}
+```
+
+### Plain Text
+Clean text output for documentation systems and CLIs.
+
+## Advanced Usage
+
+### Custom Templates
+Create format-specific templates for specialized output:
+
+```jinja2
+{# templates/formats/api-spec.json.j2 #}
+{
+  "apiVersion": "v1",
+  "kind": "Documentation",
+  "metadata": {{ metadata | tojson }},
+  "spec": {
+    "sections": [
+      {% for section in content.sections %}
+      {
+        "name": "{{ section.title }}",
+        "content": "{{ section.content | join(' ') }}"
+      }{% if not loop.last %},{% endif %}
+      {% endfor %}
+    ]
+  }
+}
+```
+
+### Batch Processing
+Process multiple files programmatically:
+
+```python
+from ctxssg.generator import Site
+from pathlib import Path
+
+site = Site(Path("my-docs"))
+site.build()  # Generate all formats
+```
 
 ## Development
 
-To contribute to this tool, first checkout the code. Then create a new virtual environment:
+### Setup Development Environment
 ```bash
+git clone https://github.com/kgruel/ctxssg.git
 cd ctxssg
 python -m venv venv
-source venv/bin/activate
+source venv/bin/activate  # or `venv\Scripts\activate` on Windows
+pip install -e '.[dev]'
 ```
 
-Now install the dependencies and test dependencies:
+### Run Tests
 ```bash
-pip install -e '.[test]'
+python -m pytest                    # Run test suite
+ruff check .                       # Lint code
+ruff format .                      # Format code
 ```
 
-To run the tests:
-```bash
-python -m pytest
-```
+### Project Architecture
+- `ctxssg/generator.py` - Core site generation logic
+- `ctxssg/cli.py` - Command-line interface
+- `ctxssg/templates/` - Package template resources
+- `ctxssg/assets/` - Default CSS and static assets
 
-For development with automatic rebuilding:
-```bash
-ctxssg serve --watch --port 8080
-```
+## Requirements
 
-This will:
-- Start a local server at http://localhost:8080
-- Watch for file changes
-- Automatically rebuild the site
-- No browser refresh needed!
+### System Dependencies
+- **Pandoc**: Document conversion engine
+- **Python 3.10+**: Modern Python with typing support
+
+### Python Dependencies
+- `click` - CLI framework
+- `jinja2` - Template engine
+- `pypandoc` - Pandoc integration
+- `pyyaml` - YAML configuration support
+- `tomli` - TOML configuration support
+- `python-frontmatter` - Frontmatter parsing
+- `beautifulsoup4` - HTML parsing
+- `watchdog` - File system monitoring
 
 ## License
 
 Apache-2.0
+
+## Contributing
+
+Contributions are welcome! Please read the contributing guidelines and submit pull requests for any enhancements.
