@@ -7,5 +7,6 @@ from .resources import ResourceLoader
 from .config import ConfigLoader
 from .content import ContentProcessor
 from .formats import FormatGenerator
+from .cache import BuildCache
 
-__all__ = ["Site", "SiteGenerator", "ResourceLoader", "ConfigLoader", "ContentProcessor", "FormatGenerator"]
+__all__ = ["Site", "SiteGenerator", "ResourceLoader", "ConfigLoader", "ContentProcessor", "FormatGenerator", "BuildCache"]

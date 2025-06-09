@@ -77,7 +77,10 @@ def init(path, title):
 @cli.command()
 @click.option('--watch', '-w', is_flag=True, help='Watch for changes and rebuild')
 @click.option('--formats', '-f', multiple=True, help='Output formats (html, plain, xml)')
-def build(watch, formats):
+@click.option('--incremental/--full', default=True, help='Use incremental building (default: incremental)')
+@click.option('--clean', is_flag=True, help='Force clean rebuild (removes cache)')
+@click.option('--stats', is_flag=True, help='Show build statistics')
+def build(watch, formats, incremental, clean, stats):
     """Build the static site."""
     # Check dependencies first
     try:
@@ -102,11 +105,39 @@ def build(watch, formats):
     
     def do_build():
         try:
-            click.echo("Building site...")
+            build_type = "clean" if clean else ("full" if not incremental else "incremental")
+            click.echo(f"Building site ({build_type})...")
             output_formats = site.config.get('output_formats', ['html'])
             click.echo(f"Output formats: {', '.join(output_formats)}")
-            site.build()
-            click.secho(f"Site built successfully to {site.output_dir}", fg='green')
+            
+            build_stats = site.build(incremental=incremental, clean=clean, show_stats=stats)
+            
+            if stats and build_stats:
+                # Show detailed build statistics
+                cache_enabled = build_stats.get("cache_enabled", False)
+                total_files = build_stats.get("total_files", 0)
+                rebuilt_files = build_stats.get("rebuilt_files", 0)
+                cached_files = build_stats.get("cached_files", 0)
+                duration = build_stats.get("duration", 0)
+                
+                if cache_enabled and total_files > 0:
+                    cache_hit_rate = build_stats.get("cache_hit_rate", 0)
+                    click.echo(f"Incremental build: {rebuilt_files}/{total_files} files rebuilt ({cache_hit_rate:.1f}% cached)")
+                else:
+                    click.echo(f"Full build: {rebuilt_files} files processed")
+                    
+                click.echo(f"Build completed in {duration:.2f}s")
+                
+                # Show time savings estimate
+                if cache_enabled and cached_files > 0:
+                    time_per_file = duration / max(rebuilt_files, 1)
+                    estimated_full_time = time_per_file * total_files
+                    if estimated_full_time > duration:
+                        time_saved = estimated_full_time - duration
+                        click.secho(f"Estimated time saved: {time_saved:.2f}s", fg='cyan')
+            else:
+                click.secho(f"Site built successfully to {site.output_dir}", fg='green')
+                
         except Exception as e:
             click.secho(f"Build error: {e}", fg='red')
     
@@ -285,6 +316,91 @@ def doctor():
             click.secho(f"✗ {dir_name}/: not found", fg='yellow')
     
     click.echo("\nDependency check complete!")
+
+
+@cli.group()
+def cache():
+    """Manage the build cache."""
+    pass
+
+
+@cache.command('info')
+def cache_info():
+    """Show cache statistics."""
+    from .cache import BuildCache
+    
+    site_path = Path.cwd()
+    cache_dir = site_path / '.ctxssg-cache'
+    
+    if not cache_dir.exists():
+        click.secho("No cache found. Run a build first to create cache.", fg='yellow')
+        return
+    
+    try:
+        cache = BuildCache(cache_dir)
+        stats = cache.get_stats()
+        
+        click.echo("Build Cache Statistics:")
+        click.echo(f"  Files tracked: {stats['files_tracked']}")
+        click.echo(f"  Templates tracked: {stats['templates_tracked']}")
+        click.echo(f"  Disk cache size: {stats['disk_cache_size_mb']:.2f} MB")
+        click.echo(f"  Memory cache size: {stats['memory_cache_size_mb']:.2f} MB")
+        click.echo(f"  Memory cache entries: {stats['memory_cache_entries']}")
+        
+        if stats['last_build']:
+            click.echo(f"  Last build: {stats['last_build']}")
+        else:
+            click.echo("  Last build: Never")
+            
+    except Exception as e:
+        click.secho(f"Error reading cache: {e}", fg='red')
+
+
+@cache.command('clear')
+@click.confirmation_option(prompt='Are you sure you want to clear the cache?')
+def cache_clear():
+    """Clear the build cache."""
+    from .cache import BuildCache
+    
+    site_path = Path.cwd()
+    cache_dir = site_path / '.ctxssg-cache'
+    
+    if not cache_dir.exists():
+        click.secho("No cache found.", fg='yellow')
+        return
+    
+    try:
+        cache = BuildCache(cache_dir)
+        cache.clear()
+        click.secho("Cache cleared successfully.", fg='green')
+    except Exception as e:
+        click.secho(f"Error clearing cache: {e}", fg='red')
+
+
+@cache.command('clean')
+@click.option('--older-than', type=int, default=30, help='Remove entries older than N days')
+def cache_clean(older_than):
+    """Clean old cache entries."""
+    from .cache import BuildCache
+    
+    site_path = Path.cwd()
+    cache_dir = site_path / '.ctxssg-cache'
+    
+    if not cache_dir.exists():
+        click.secho("No cache found.", fg='yellow')
+        return
+    
+    try:
+        cache = BuildCache(cache_dir)
+        cleaned_count = cache.clean_old_entries(older_than)
+        
+        if cleaned_count > 0:
+            click.secho(f"Cleaned {cleaned_count} old cache entries.", fg='green')
+        else:
+            click.echo("No old cache entries to clean.")
+            
+    except Exception as e:
+        click.secho(f"Error cleaning cache: {e}", fg='red')
 
 
 @cli.command()

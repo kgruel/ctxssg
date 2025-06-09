@@ -2,14 +2,18 @@
 
 import shutil
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Set, Optional
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from datetime import datetime
+from datetime import datetime, date
+import logging
 
 from .resources import ResourceLoader
 from .config import ConfigLoader
 from .content import ContentProcessor
 from .formats import FormatGenerator
+from .cache import BuildCache, CacheCorruptionError
+
+logger = logging.getLogger(__name__)
 
 
 def check_dependencies() -> None:
@@ -61,8 +65,36 @@ class Site:
         self.format_generator = FormatGenerator(self.env, self.config)
         
     
-    def build(self) -> None:
-        """Build the entire site."""
+    def build(self, incremental: bool = True, clean: bool = False, show_stats: bool = False) -> Dict[str, Any]:
+        """Build the entire site with optional incremental building.
+        
+        Args:
+            incremental: Use incremental building if True
+            clean: Force clean rebuild (removes cache)
+            show_stats: Return build statistics
+            
+        Returns:
+            Build statistics if show_stats=True, otherwise empty dict
+        """
+        stats = {
+            "total_files": 0,
+            "rebuilt_files": 0,
+            "cached_files": 0,
+            "start_time": datetime.now(),
+            "cache_enabled": incremental and not clean
+        }
+        
+        if clean or not incremental:
+            return self._full_build(stats, show_stats)
+        else:
+            try:
+                return self._incremental_build(stats, show_stats)
+            except (CacheCorruptionError, Exception) as e:
+                logger.warning(f"Incremental build failed: {e}. Falling back to full rebuild.")
+                return self._full_build(stats, show_stats)
+    
+    def _full_build(self, stats: Dict[str, Any], show_stats: bool) -> Dict[str, Any]:
+        """Perform a full rebuild of the site."""
         # Clean output directory
         if self.output_dir.exists():
             shutil.rmtree(self.output_dir)
@@ -83,6 +115,9 @@ class Site:
         posts = []
         
         for content_file in self.content_dir.rglob("*.md"):
+            stats["total_files"] += 1
+            stats["rebuilt_files"] += 1
+            
             page_data = self.content_processor.process_content(content_file)
             
             # Determine output path base
@@ -113,6 +148,94 @@ class Site:
         
         # Generate index page
         self._generate_index(posts, pages)
+        stats["rebuilt_files"] += 1  # Count index page
+        
+        if show_stats:
+            stats["end_time"] = datetime.now()
+            stats["duration"] = (stats["end_time"] - stats["start_time"]).total_seconds()
+            return stats
+        return {}
+    
+    def _incremental_build(self, stats: Dict[str, Any], show_stats: bool) -> Dict[str, Any]:
+        """Perform an incremental rebuild of the site."""
+        # Initialize cache
+        cache_dir = self.root / '.ctxssg-cache'
+        cache = BuildCache(cache_dir)
+        
+        # Update template dependencies
+        cache.update_template_dependencies(self.templates_dir)
+        
+        # Ensure output directory exists
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Find all content files
+        content_files = set(self.content_dir.rglob("*.md"))
+        stats["total_files"] = len(content_files)
+        
+        # Determine which files need rebuilding
+        changed_files = cache.get_changed_files(content_files)
+        
+        # Add template changes to changed files
+        for template_file in self.templates_dir.rglob("*.html"):
+            if cache.is_file_changed(template_file):
+                changed_files.add(template_file)
+        
+        # Get all affected files (including dependencies)
+        affected_files = cache.get_affected_files(changed_files, self.templates_dir)
+        
+        # Filter to only content files for rebuilding
+        affected_content = {f for f in affected_files if f.suffix == '.md' and f in content_files}
+        
+        # Clean orphaned outputs
+        orphaned_outputs = cache.get_orphaned_outputs(content_files)
+        for orphaned_file in orphaned_outputs:
+            if orphaned_file.exists():
+                orphaned_file.unlink()
+                logger.debug(f"Removed orphaned output: {orphaned_file}")
+        
+        # Handle static files and CSS
+        self._process_static_incremental(cache)
+        
+        # Get output formats from config
+        output_formats = self.config.get('output_formats', ['html'])
+        
+        # Process affected content files
+        pages = []
+        posts = []
+        
+        for content_file in content_files:
+            if content_file in affected_content:
+                # Rebuild this file
+                stats["rebuilt_files"] += 1
+                page_data = self._process_content_file_cached(content_file, cache, output_formats)
+            else:
+                # Use cached data if available
+                stats["cached_files"] += 1
+                page_data = self._get_cached_content_data(content_file, cache)
+                if page_data is None:
+                    # Cache miss - rebuild
+                    stats["rebuilt_files"] += 1
+                    stats["cached_files"] -= 1
+                    page_data = self._process_content_file_cached(content_file, cache, output_formats)
+            
+            # Collect for index generation
+            relative_path = content_file.relative_to(self.content_dir)
+            if relative_path.parts[0] == "posts":
+                posts.append(page_data)
+            else:
+                pages.append(page_data)
+        
+        # Always regenerate index (for now - could be optimized)
+        self._generate_index(posts, pages)
+        stats["rebuilt_files"] += 1
+        
+        if show_stats:
+            stats["end_time"] = datetime.now()
+            stats["duration"] = (stats["end_time"] - stats["start_time"]).total_seconds()
+            cache_hit_rate = (stats["cached_files"] / stats["total_files"] * 100) if stats["total_files"] > 0 else 0
+            stats["cache_hit_rate"] = cache_hit_rate
+            return stats
+        return {}
     
     def _generate_format(self, page_data: Dict[str, Any], source_file: Path, output_base: Path, fmt: str) -> None:
         """Generate output file for a specific format - wrapper for CLI compatibility."""
@@ -149,7 +272,21 @@ class Site:
     def _generate_index(self, posts: List[Dict[str, Any]], pages: List[Dict[str, Any]]) -> None:
         """Generate the index page."""
         # Sort posts by date (newest first)
-        posts.sort(key=lambda x: x.get('date', datetime.min), reverse=True)
+        # Normalize all dates to datetime objects for consistent comparison
+        def get_sort_date(post):
+            post_date = post.get('date')
+            if post_date is None:
+                return datetime.min
+            elif isinstance(post_date, date) and not isinstance(post_date, datetime):
+                # Convert date to datetime (at start of day)
+                return datetime.combine(post_date, datetime.min.time())
+            elif isinstance(post_date, datetime):
+                return post_date
+            else:
+                # Fallback for unexpected types
+                return datetime.min
+                
+        posts.sort(key=get_sort_date, reverse=True)
         
         index_data = {
             'title': self.config.get('title', 'Home'),
@@ -231,6 +368,160 @@ code {
 '''
         output_path.write_text(basic_css)
     
+    def _process_static_incremental(self, cache: BuildCache) -> None:
+        """Process static files incrementally."""
+        if not self.static_dir.exists():
+            return
+            
+        output_static_dir = self.output_dir / "static"
+        output_static_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy changed static files
+        for static_file in self.static_dir.rglob("*"):
+            if static_file.is_file():
+                relative_path = static_file.relative_to(self.static_dir)
+                output_path = output_static_dir / relative_path
+                
+                # Skip CSS files - they're handled separately
+                if relative_path.parts[0] == "css" and relative_path.name == "style.css":
+                    continue
+                    
+                # Check if file has changed
+                if cache.is_file_changed(static_file):
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(static_file, output_path)
+                    logger.debug(f"Copied static file: {relative_path}")
+        
+        # Process CSS separately
+        self._process_css()
+        
+    def _process_content_file_cached(self, content_file: Path, cache: BuildCache, output_formats: List[str]) -> Dict[str, Any]:
+        """Process a content file with caching support."""
+        # Get file hash
+        file_hash = cache.get_file_hash(content_file)
+        
+        # Try to get from cache first
+        cached_content = cache.get_cached_content(file_hash)
+        if cached_content and not self._templates_changed_for_content(cached_content, cache):
+            # Cache hit - generate outputs from cached data
+            page_data = cached_content
+        else:
+            # Cache miss or templates changed - process content
+            page_data = self.content_processor.process_content(content_file)
+            
+            # Store template dependencies
+            layout = page_data.get('layout', 'default')
+            templates_used = self._get_template_chain(layout)
+            
+            # Cache the processed content
+            cache_data = {
+                **page_data,
+                "templates_used": templates_used
+            }
+            cache.cache_content(file_hash, cache_data)
+        
+        # Generate output files
+        self._generate_outputs_for_content(content_file, page_data, output_formats, cache)
+        
+        # Update file info in cache
+        output_files = self._get_output_files_for_content(content_file, output_formats)
+        cache.update_file_info(
+            content_file, 
+            file_hash,
+            layout=page_data.get('layout', 'default'),
+            templates=page_data.get("templates_used", []),
+            outputs=[str(f) for f in output_files]
+        )
+        
+        return page_data
+        
+    def _get_cached_content_data(self, content_file: Path, cache: BuildCache) -> Optional[Dict[str, Any]]:
+        """Get cached content data if valid."""
+        file_hash = cache.get_file_hash(content_file)
+        cached_content = cache.get_cached_content(file_hash)
+        
+        if cached_content and not self._templates_changed_for_content(cached_content, cache):
+            return cached_content
+        return None
+        
+    def _templates_changed_for_content(self, content_data: Dict[str, Any], cache: BuildCache) -> bool:
+        """Check if any templates used by this content have changed."""
+        templates_used = content_data.get("templates_used", [])
+        return cache.is_template_changed(templates_used)
+        
+    def _get_template_chain(self, layout: str) -> List[str]:
+        """Get the full chain of templates used for a layout."""
+        templates = []
+        current_layout = layout
+        
+        while current_layout:
+            template_name = f"{current_layout}.html"
+            templates.append(template_name)
+            
+            # Check if this template extends another
+            try:
+                template_path = self.templates_dir / template_name
+                if template_path.exists():
+                    from .cache import TemplateAnalyzer
+                    deps = TemplateAnalyzer.analyze_template(template_path)
+                    extends = deps.get("extends", [])
+                    current_layout = extends[0].replace('.html', '') if extends else None
+                else:
+                    break
+            except Exception:
+                break
+                
+        return templates
+        
+    def _generate_outputs_for_content(self, content_file: Path, page_data: Dict[str, Any], output_formats: List[str], cache: BuildCache) -> None:
+        """Generate all output files for a piece of content."""
+        # Determine output path base
+        relative_path = content_file.relative_to(self.content_dir)
+        if relative_path.parts[0] == "posts":
+            post_relative = Path(*relative_path.parts[1:])
+            output_base = self.output_dir / "posts" / post_relative.with_suffix('')
+        else:
+            output_base = self.output_dir / relative_path.with_suffix('')
+        
+        # Generate files for each output format
+        for fmt in output_formats:
+            if fmt == 'html':
+                # Use existing HTML rendering with templates
+                html = self._render_page(page_data)
+                output_path = output_base.with_suffix('.html')
+                # Ensure directory exists
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(html)
+            else:
+                # Use format generator for other formats
+                self.format_generator.generate_format(
+                    page_data, content_file, output_base, fmt, self.content_processor
+                )
+                
+    def _get_output_files_for_content(self, content_file: Path, output_formats: List[str]) -> List[Path]:
+        """Get list of output files that would be generated for a content file."""
+        relative_path = content_file.relative_to(self.content_dir)
+        if relative_path.parts[0] == "posts":
+            post_relative = Path(*relative_path.parts[1:])
+            output_base = self.output_dir / "posts" / post_relative.with_suffix('')
+        else:
+            output_base = self.output_dir / relative_path.with_suffix('')
+            
+        output_files = []
+        for fmt in output_formats:
+            if fmt == 'html':
+                output_files.append(output_base.with_suffix('.html'))
+            else:
+                # Map format to file extension
+                format_extensions = {
+                    'plain': '.txt',
+                    'json': '.json',
+                    'xml': '.xml'
+                }
+                ext = format_extensions.get(fmt, f'.{fmt}')
+                output_files.append(output_base.with_suffix(ext))
+                
+        return output_files
 
 
 class SiteGenerator:
