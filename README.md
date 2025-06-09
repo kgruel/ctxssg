@@ -5,7 +5,7 @@
 [![Tests](https://github.com/kgruel/ctxssg/actions/workflows/test.yml/badge.svg)](https://github.com/kgruel/ctxssg/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/kgruel/ctxssg/blob/master/LICENSE)
 
-A modern, pandoc-based static site generator designed for technical documentation and content that requires structured output in multiple formats.
+A pandoc-based static site generator designed for technical documentation and content that requires structured output in multiple formats.
 
 ## Features
 
@@ -16,20 +16,18 @@ A modern, pandoc-based static site generator designed for technical documentatio
 - **TOML Configuration**: Modern configuration with format-specific options
 - **Live Development Server**: Hot-reload development environment with file watching
 
-### Technical Benefits
-- **Structured Content Processing**: Parse markdown into semantic sections for API consumption
-- **Type-safe Configuration**: Comprehensive configuration validation and error handling
-- **Dependency Management**: Built-in system dependency checking and diagnostics
-- **Resource Management**: Smart package resource loading with fallback mechanisms
-- **Zero-configuration Defaults**: Sensible defaults with full customization capability
-
 ## Installation
 
 ### Prerequisites
 - Python 3.10+
 - [Pandoc](https://pandoc.org/installing.html) (required for document conversion)
 
-### Install via pip
+## Install
+```bash
+uv tool install ctxssg
+```
+
+### via Pip
 ```bash
 pip install ctxssg
 ```
