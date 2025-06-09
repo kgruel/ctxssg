@@ -8,12 +8,26 @@ license = "Apache-2.0"
 requires-python = ">=3.8"
 classifiers = []
 dependencies = [
-    "click"
+    "click>=8.0",
+    "pypandoc>=1.11",
+    "pyyaml>=6.0",
+    "jinja2>=3.0",
+    "watchdog>=3.0",
+    "python-frontmatter>=1.0",
+    "beautifulsoup4>=4.12",
 ]
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "black>=24.8.0",
+    "mypy>=1.14.1",
+    "pytest>=8.3.5",
+    "ruff>=0.11.13",
+]
 
 [project.urls]
 Homepage = "https://github.com/kgruel/ctxssg"
