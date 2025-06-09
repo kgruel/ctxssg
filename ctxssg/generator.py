@@ -3,20 +3,13 @@
 import shutil
 from pathlib import Path
 from typing import Dict, List, Any
-import yaml
-import frontmatter
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-import pypandoc
 from datetime import datetime
-import re
-from bs4 import BeautifulSoup
-import sys
 
-# TOML support for configuration
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
+from .resources import ResourceLoader
+from .config import ConfigLoader
+from .content import ContentProcessor
+from .formats import FormatGenerator
 
 
 def check_dependencies() -> None:
@@ -33,86 +26,17 @@ def check_dependencies() -> None:
         raise RuntimeError(f"Error checking pandoc installation: {e}")
 
 
-class ResourceLoader:
-    """Smart resource loading with fallback handling for package resources."""
-    
-    def __init__(self, package_name: str = 'ctxssg'):
-        self.package = package_name
-        self.package_path = Path(__file__).parent
-        
-    def load_resource(self, resource_path: str, fallback: str = '') -> str:
-        """Load a resource file from the package with optional fallback."""
-        full_path = self.package_path / resource_path
-        
-        if full_path.exists():
-            try:
-                return full_path.read_text(encoding='utf-8')
-            except Exception as e:
-                if fallback:
-                    return fallback
-                raise RuntimeError(f"Failed to read resource {resource_path}: {e}")
-        elif fallback:
-            return fallback
-        else:
-            raise FileNotFoundError(f"Resource not found: {resource_path}")
-    
-    def resource_exists(self, resource_path: str) -> bool:
-        """Check if a resource exists in the package."""
-        return (self.package_path / resource_path).exists()
-    
-    def copy_resource(self, resource_path: str, destination: Path, 
-                     overwrite: bool = False) -> bool:
-        """Copy a single resource file to destination."""
-        source_path = self.package_path / resource_path
-        
-        if not source_path.exists():
-            return False
-            
-        if destination.exists() and not overwrite:
-            return False
-            
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, destination)
-            return True
-        except Exception:
-            return False
-    
-    def copy_tree(self, source_dir: str, destination: Path, 
-                  overwrite: bool = False) -> List[Path]:
-        """Copy a directory tree from package resources."""
-        source_path = self.package_path / source_dir
-        copied_files = []
-        
-        if not source_path.exists() or not source_path.is_dir():
-            return copied_files
-            
-        for source_file in source_path.rglob('*'):
-            if source_file.is_file():
-                relative_path = source_file.relative_to(source_path)
-                dest_file = destination / relative_path
-                
-                if not dest_file.exists() or overwrite:
-                    dest_file.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source_file, dest_file)
-                    copied_files.append(dest_file)
-                    
-        return copied_files
-        
-    def format_template(self, template_content: str, **kwargs) -> str:
-        """Format a template string with the provided kwargs."""
-        try:
-            return template_content.format(**kwargs)
-        except KeyError as e:
-            raise ValueError(f"Missing template variable: {e}")
-
-
 class Site:
     """Represents a static site with its configuration and structure."""
     
     def __init__(self, root_path: Path):
         self.root = root_path
-        self.config = self._load_config()
+        
+        # Initialize configuration
+        config_loader = ConfigLoader(root_path)
+        self.config = config_loader.load_config()
+        
+        # Set up directories
         self.content_dir = self.root / "content"
         self.templates_dir = self.root / "templates"
         self.static_dir = self.root / "static"
@@ -132,57 +56,10 @@ class Site:
             autoescape=select_autoescape(['html', 'xml'])
         )
         
-    def _load_config(self) -> Dict[str, Any]:
-        """Load site configuration from config.toml or config.yaml."""
-        # Try TOML first (preferred), then YAML for backward compatibility
-        toml_path = self.root / "config.toml"
-        yaml_path = self.root / "config.yaml"
+        # Initialize processors
+        self.content_processor = ContentProcessor(self.content_dir)
+        self.format_generator = FormatGenerator(self.env, self.config)
         
-        if toml_path.exists():
-            with open(toml_path, 'rb') as f:
-                config = tomllib.load(f)
-                return self._normalize_config(config)
-        elif yaml_path.exists():
-            with open(yaml_path, 'r') as f:
-                config = yaml.safe_load(f) or {}
-                return self._normalize_config(config)
-        
-        return self._get_default_config()
-    
-    def _normalize_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize configuration to internal format."""
-        # Handle TOML nested structure vs flat YAML structure
-        if 'site' in config:
-            # TOML format with sections
-            normalized = {}
-            # Flatten site section to root
-            normalized.update(config.get('site', {}))
-            # Add build settings
-            normalized.update(config.get('build', {}))
-            # Add template settings
-            if 'templates' in config:
-                normalized['template_config'] = config['templates']
-            # Add format-specific settings
-            if 'formats' in config:
-                normalized['format_config'] = config['formats']
-            # Add CSS settings
-            if 'css' in config:
-                normalized['css'] = config['css']
-            return normalized
-        else:
-            # YAML format (flat) or legacy TOML
-            return config
-    
-    def _get_default_config(self) -> Dict[str, Any]:
-        """Get default configuration when no config file exists."""
-        return {
-            'title': 'My Site',
-            'url': 'http://localhost:8000',
-            'description': 'A static site generated with ctxssg',
-            'author': 'Your Name',
-            'output_dir': '_site',
-            'output_formats': ['html'],
-        }
     
     def build(self) -> None:
         """Build the entire site."""
@@ -206,7 +83,7 @@ class Site:
         posts = []
         
         for content_file in self.content_dir.rglob("*.md"):
-            page_data = self._process_content(content_file)
+            page_data = self.content_processor.process_content(content_file)
             
             # Determine output path base
             relative_path = content_file.relative_to(self.content_dir)
@@ -221,287 +98,40 @@ class Site:
             
             # Generate files for each output format
             for fmt in output_formats:
-                self._generate_format(page_data, content_file, output_base, fmt)
+                if fmt == 'html':
+                    # Use existing HTML rendering with templates
+                    html = self._render_page(page_data)
+                    output_path = output_base.with_suffix('.html')
+                    # Ensure directory exists
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(html)
+                else:
+                    # Use format generator for other formats
+                    self.format_generator.generate_format(
+                        page_data, content_file, output_base, fmt, self.content_processor
+                    )
         
         # Generate index page
         self._generate_index(posts, pages)
     
     def _generate_format(self, page_data: Dict[str, Any], source_file: Path, output_base: Path, fmt: str) -> None:
-        """Generate output file for a specific format using templates."""
-        # Ensure output directory exists
-        output_base.parent.mkdir(parents=True, exist_ok=True)
-        
+        """Generate output file for a specific format - wrapper for CLI compatibility."""
         if fmt == 'html':
             # Use existing HTML rendering with templates
             html = self._render_page(page_data)
             output_path = output_base.with_suffix('.html')
+            # Ensure directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(html)
-        
-        elif fmt in ['plain', 'txt']:
-            # Use template-based plain text generation
-            post = frontmatter.load(source_file)
-            
-            # Get format-specific configuration
-            plain_config = self.config.get('format_config', {}).get('plain', {})
-            wrap_width = plain_config.get('wrap_width', 0)  # 0 means no wrap
-            include_metadata = plain_config.get('include_metadata', True)
-            
-            # Generate plain text content using pandoc
-            try:
-                extra_args = []
-                if wrap_width > 0:
-                    extra_args.append('--wrap=auto')  # Pandoc expects 'auto', 'none', or 'preserve'
-                else:
-                    extra_args.append('--wrap=none')
-                
-                plain_content = pypandoc.convert_text(
-                    post.content,
-                    'plain',
-                    format='markdown',
-                    extra_args=extra_args
-                )
-            except OSError as e:
-                if "pandoc" in str(e).lower():
-                    raise RuntimeError("Pandoc is not installed. Please install pandoc: https://pandoc.org/installing.html")
-                raise
-            except Exception as e:
-                raise RuntimeError(f"Failed to convert markdown to plain text: {e}")
-            
-            # Prepare metadata for template
-            metadata = {}
-            if include_metadata:
-                for key, value in page_data.items():
-                    if key not in ['content', 'url'] and value is not None:
-                        if hasattr(value, 'isoformat'):
-                            value = value.isoformat()
-                        metadata[key] = value
-            
-            # Render using template
-            template = self.env.get_template('formats/document.txt.j2')
-            content = template.render(
-                metadata=metadata if include_metadata else {},
-                plain_content=plain_content,
-                include_metadata=include_metadata
-            )
-            
-            output_path = output_base.with_suffix('.txt')
-            output_path.write_text(content)
-        
-        elif fmt == 'xml':
-            # Use template-based XML generation
-            # Get format-specific configuration
-            xml_config = self.config.get('format_config', {}).get('xml', {})
-            include_namespaces = xml_config.get('include_namespaces', False)
-            
-            # Parse HTML content into structured format
-            content_structure = self._parse_content_structure(page_data['content'])
-            
-            # Prepare metadata for template
-            metadata = {}
-            for key, value in page_data.items():
-                if key not in ['content', 'url'] and value is not None:
-                    if hasattr(value, 'isoformat'):
-                        value = value.isoformat()
-                    metadata[key] = value
-            
-            # Render using template
-            template = self.env.get_template('formats/document.xml.j2')
-            content = template.render(
-                metadata=metadata,
-                content=content_structure,
-                include_namespaces=include_namespaces
-            )
-            
-            output_path = output_base.with_suffix('.xml')
-            output_path.write_text(content)
-        
-        elif fmt == 'json':
-            # Use template-based JSON generation
-            # Get format-specific configuration
-            json_config = self.config.get('format_config', {}).get('json', {})
-            pretty_print = json_config.get('pretty_print', True)
-            include_metadata = json_config.get('include_metadata', True)
-            
-            # Parse HTML content into structured format
-            content_structure = self._parse_content_structure(page_data['content'])
-            
-            # Prepare metadata for template
-            metadata = {}
-            if include_metadata:
-                for key, value in page_data.items():
-                    if key not in ['content', 'url'] and value is not None:
-                        if hasattr(value, 'isoformat'):
-                            value = value.isoformat()
-                        metadata[key] = value
-            
-            # Render using template
-            template = self.env.get_template('formats/document.json.j2')
-            content = template.render(
-                metadata=metadata if include_metadata else {},
-                content=content_structure,
-                pretty_print=pretty_print,
-                include_metadata=include_metadata
-            )
-            
-            output_path = output_base.with_suffix('.json')
-            output_path.write_text(content)
-        
         else:
-            # Generic pandoc conversion for other formats
-            post = frontmatter.load(source_file)
-            try:
-                converted_content = pypandoc.convert_text(
-                    post.content,
-                    fmt,
-                    format='markdown'
-                )
-            except OSError as e:
-                if "pandoc" in str(e).lower():
-                    raise RuntimeError("Pandoc is not installed. Please install pandoc: https://pandoc.org/installing.html")
-                raise
-            except Exception as e:
-                raise RuntimeError(f"Failed to convert markdown to {fmt} format: {e}")
-            
-            output_path = output_base.with_suffix(f'.{fmt}')
-            output_path.write_text(converted_content)
-        
-    def _process_content(self, file_path: Path) -> Dict[str, Any]:
-        """Process a markdown file with frontmatter."""
-        post = frontmatter.load(file_path)
-        
-        # Convert markdown to HTML using pandoc
-        try:
-            html_content = pypandoc.convert_text(
-                post.content,
-                'html',
-                format='markdown',
-                extra_args=['--highlight-style=pygments']
+            # Use format generator for other formats
+            self.format_generator.generate_format(
+                page_data, source_file, output_base, fmt, self.content_processor
             )
-            
-            # Remove automatically generated header IDs for cleaner HTML
-            import re
-            html_content = re.sub(r'(<h[1-6])\s+id="[^"]*"', r'\1', html_content)
-        except OSError as e:
-            if "pandoc" in str(e).lower():
-                raise RuntimeError("Pandoc is not installed. Please install pandoc: https://pandoc.org/installing.html")
-            raise
-        except Exception as e:
-            raise RuntimeError(f"Failed to convert markdown to HTML: {e}")
-        
-        # Build page data
-        page_data = {
-            'title': post.get('title', file_path.stem),
-            'content': html_content,
-            'date': post.get('date', datetime.now()),
-            'layout': post.get('layout', 'default'),
-            'url': self._get_url(file_path),
-            **post.metadata
-        }
-        
-        return page_data
     
-    def _get_url(self, file_path: Path) -> str:
-        """Generate URL for a content file."""
-        relative_path = file_path.relative_to(self.content_dir).with_suffix('.html')
-        return f"/{relative_path.as_posix()}"
-    
-    def _parse_content_structure(self, html_content: str) -> Dict[str, Any]:
-        """Parse HTML content into structured data for templating."""
-        soup = BeautifulSoup(html_content, 'html.parser')
-        sections = []
-        current_section = None
-        
-        for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'ul', 'ol', 'pre', 'blockquote']):
-            if element.name.startswith('h'):
-                # Start new section
-                if current_section:
-                    sections.append(current_section)
-                
-                level = int(element.name[1])
-                section_id = element.get('id') or self._generate_id(element.get_text())
-                
-                current_section = {
-                    'id': section_id,
-                    'level': level,
-                    'title': element.get_text().strip(),
-                    'content': []
-                }
-            elif current_section:
-                # Add content to current section
-                if element.name == 'p':
-                    current_section['content'].append({
-                        'type': 'paragraph',
-                        'text': self._clean_html(element)
-                    })
-                elif element.name in ['ul', 'ol']:
-                    list_items = [self._clean_html(li) for li in element.find_all('li')]
-                    current_section['content'].append({
-                        'type': 'list',
-                        'list_type': 'ordered' if element.name == 'ol' else 'bullet',
-                        'items': list_items
-                    })
-                elif element.name == 'pre':
-                    code_element = element.find('code')
-                    if code_element:
-                        language = None
-                        if code_element.get('class'):
-                            for cls in code_element.get('class'):
-                                if cls.startswith('sourceCode'):
-                                    continue
-                                if cls.startswith('language-'):
-                                    language = cls[9:]
-                                else:
-                                    language = cls
-                                break
-                        
-                        current_section['content'].append({
-                            'type': 'code',
-                            'language': language,
-                            'text': code_element.get_text()
-                        })
-                    else:
-                        current_section['content'].append({
-                            'type': 'code',
-                            'language': None,
-                            'text': element.get_text()
-                        })
-                elif element.name == 'blockquote':
-                    current_section['content'].append({
-                        'type': 'quote',
-                        'text': self._clean_html(element)
-                    })
-        
-        # Add the last section
-        if current_section:
-            sections.append(current_section)
-        
-        # If no sections were found, create a default section
-        if not sections:
-            sections.append({
-                'id': 'content',
-                'level': 1,
-                'title': 'Content',
-                'content': [{
-                    'type': 'paragraph',
-                    'text': self._clean_html(soup)
-                }]
-            })
-        
-        return {'sections': sections}
-    
-    
-    def _generate_id(self, text: str) -> str:
-        """Generate a URL-safe ID from text."""
-        # Convert to lowercase and replace spaces/special chars with hyphens
-        id_text = re.sub(r'[^\w\s-]', '', text.lower())
-        id_text = re.sub(r'[-\s]+', '-', id_text)
-        return id_text.strip('-')
-    
-    def _clean_html(self, element) -> str:
-        """Extract clean text from HTML element, preserving basic formatting."""
-        if hasattr(element, 'get_text'):
-            return element.get_text().strip()
-        return str(element).strip()
+    def _process_content(self, file_path: Path) -> Dict[str, Any]:
+        """Process a markdown file with frontmatter - wrapper for CLI compatibility."""
+        return self.content_processor.process_content(file_path)
     
     def _render_page(self, page_data: Dict[str, Any]) -> str:
         """Render a page using Jinja2 templates."""
