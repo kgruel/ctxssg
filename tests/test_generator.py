@@ -80,55 +80,31 @@ class TestSiteGenerator:
 class TestSite:
     """Test the Site class."""
     
-    def setup_method(self):
-        """Set up test site."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.site_path = Path(self.temp_dir)
-        SiteGenerator.init_site(self.site_path, "Test Site")
-        self.site = Site(self.site_path)
-    
-    def teardown_method(self):
-        """Clean up test site."""
-        shutil.rmtree(self.temp_dir)
-    
-    def test_load_config(self):
+    def test_load_config(self, site_with_tempdir):
         """Test config loading."""
-        assert self.site.config['title'] == "Test Site"
-        assert self.site.config['output_dir'] == "_site"
+        assert site_with_tempdir.config['title'] == "Test Site"
+        assert site_with_tempdir.config['output_dir'] == "_site"
     
-    def test_build(self):
+    def test_build(self, site_with_tempdir):
         """Test site building."""
-        self.site.build()
+        site_with_tempdir.build()
         
         # Check output directory
-        assert self.site.output_dir.exists()
-        assert (self.site.output_dir / "index.html").exists()
-        assert (self.site.output_dir / "about.html").exists()
-        assert (self.site.output_dir / "posts" / "welcome.html").exists()
-        assert (self.site.output_dir / "static" / "css" / "style.css").exists()
+        assert site_with_tempdir.output_dir.exists()
+        assert (site_with_tempdir.output_dir / "index.html").exists()
+        assert (site_with_tempdir.output_dir / "about.html").exists()
+        assert (site_with_tempdir.output_dir / "posts" / "welcome.html").exists()
+        assert (site_with_tempdir.output_dir / "static" / "css" / "style.css").exists()
     
-    def test_process_content(self):
+    def test_process_content(self, site_with_tempdir, sample_markdown):
         """Test markdown processing."""
         # Create a test markdown file
-        test_md = self.site_path / "content" / "test.md"
-        test_md.write_text("""---
-title: Test Page
-layout: default
----
-
-# Test Header
-
-This is a test paragraph with **bold** text.
-
-```python
-def hello():
-    print("Hello, world!")
-```
-""")
+        test_md = site_with_tempdir.root / "content" / "test.md"
+        test_md.write_text(sample_markdown)
         
-        page_data = self.site._process_content(test_md)
+        page_data = site_with_tempdir._process_content(test_md)
         
-        assert page_data['title'] == "Test Page"
+        assert page_data['title'] == "Test Document"
         assert page_data['layout'] == "default"
         assert "<h1>Test Header</h1>" in page_data['content']
         assert "<strong>bold</strong>" in page_data['content']
@@ -148,21 +124,15 @@ class TestGenerator:
             import pytest
             pytest.skip("Pandoc not available for testing")
     
-    def test_missing_pandoc_error(self, tmp_path, monkeypatch):
+    def test_missing_pandoc_error(self, mock_pandoc_failure):
         """Test check_dependencies with missing pandoc."""
-        # Mock pypandoc to raise OSError (pandoc not found)
-        def mock_get_pandoc_version():
-            raise OSError("pandoc not found")
-        
-        monkeypatch.setattr('pypandoc.get_pandoc_version', mock_get_pandoc_version)
-        
         try:
             check_dependencies()
             assert False, "Should have raised RuntimeError"
         except RuntimeError as e:
             assert "Pandoc is required" in str(e)
     
-    def test_pandoc_other_error(self, tmp_path, monkeypatch):
+    def test_pandoc_other_error(self, monkeypatch):
         """Test check_dependencies with other pandoc error."""
         # Mock pypandoc to raise general exception
         def mock_get_pandoc_version():
@@ -176,28 +146,25 @@ class TestGenerator:
         except RuntimeError as e:
             assert "Error checking pandoc installation" in str(e)
     
-    def test_site_process_css_user_css(self, tmp_path):
+    def test_site_process_css_user_css(self, site_structure_paths, sample_config_toml):
         """Test CSS processing with user CSS file."""
-        # Create site structure
-        site_path = tmp_path / "site"
-        site_path.mkdir()
-        (site_path / "content").mkdir()
-        (site_path / "templates").mkdir()
-        (site_path / "static" / "css").mkdir(parents=True)
+        # Create site structure using fixture
+        paths = site_structure_paths
+        paths['site'].mkdir()
+        paths['content'].mkdir()
+        paths['templates'].mkdir()
+        paths['css'].mkdir(parents=True)
         
         # Create config
-        config_path = site_path / "config.toml"
-        config_path.write_text("""
-[site]
-title = "Test Site"
-""")
+        config_path = paths['site'] / "config.toml"
+        config_path.write_text(sample_config_toml)
         
         # Create user CSS
-        user_css_path = site_path / "static" / "css" / "style.css"
+        user_css_path = paths['css'] / "style.css"
         user_css_content = "body { background: red; }"
         user_css_path.write_text(user_css_content)
         
-        site = Site(site_path)
+        site = Site(paths['site'])
         site._process_css()
         
         # Check that user CSS was copied
@@ -205,23 +172,20 @@ title = "Test Site"
         assert output_css.exists()
         assert output_css.read_text() == user_css_content
     
-    def test_site_process_css_fallback(self, tmp_path):
+    def test_site_process_css_fallback(self, site_structure_paths, sample_config_toml):
         """Test CSS processing with fallback CSS."""
-        # Create site structure
-        site_path = tmp_path / "site"
-        site_path.mkdir()
-        (site_path / "content").mkdir()
-        (site_path / "templates").mkdir()
-        (site_path / "static").mkdir()
+        # Create site structure using fixture
+        paths = site_structure_paths
+        paths['site'].mkdir()
+        paths['content'].mkdir()
+        paths['templates'].mkdir()
+        paths['static'].mkdir()
         
         # Create config
-        config_path = site_path / "config.toml"
-        config_path.write_text("""
-[site]
-title = "Test Site"
-""")
+        config_path = paths['site'] / "config.toml"
+        config_path.write_text(sample_config_toml)
         
-        site = Site(site_path)
+        site = Site(paths['site'])
         site._process_css()
         
         # Should create fallback CSS
@@ -232,34 +196,28 @@ title = "Test Site"
         assert "body {" in css_content
         assert "font-family:" in css_content
     
-    def test_site_generate_index_with_posts(self, tmp_path):
+    def test_site_generate_index_with_posts(self, site_structure_paths, sample_config_toml):
         """Test index generation with posts."""
-        # Create site structure
-        site_path = tmp_path / "site"
-        site_path.mkdir()
-        (site_path / "content").mkdir()
-        (site_path / "templates").mkdir()
+        # Create site structure using fixture
+        paths = site_structure_paths
+        paths['site'].mkdir()
+        paths['content'].mkdir()
+        paths['templates'].mkdir()
         
         # Create config
-        config_path = site_path / "config.toml"
-        config_path.write_text("""
-[site]
-title = "Test Site"
-""")
+        config_path = paths['site'] / "config.toml"
+        config_path.write_text(sample_config_toml)
         
-        # Create basic templates
-        base_template = site_path / "templates" / "base.html"
-        base_template.write_text("""
-<!DOCTYPE html>
+        # Create basic templates using data from jinja_env_with_templates fixture pattern
+        base_template = paths['templates'] / "base.html"
+        base_template.write_text("""<!DOCTYPE html>
 <html>
 <head><title>{{ site.title }}</title></head>
 <body>{% block content %}{% endblock %}</body>
-</html>
-""")
+</html>""")
         
-        index_template = site_path / "templates" / "index.html"
-        index_template.write_text("""
-{% extends "base.html" %}
+        index_template = paths['templates'] / "index.html"
+        index_template.write_text("""{% extends "base.html" %}
 {% block content %}
 <h1>{{ page.title }}</h1>
 <ul>
@@ -267,10 +225,9 @@ title = "Test Site"
 <li>{{ post.title }} - {{ post.date }}</li>
 {% endfor %}
 </ul>
-{% endblock %}
-""")
+{% endblock %}""")
         
-        site = Site(site_path)
+        site = Site(paths['site'])
         
         # Ensure output directory exists
         site.output_dir.mkdir(parents=True, exist_ok=True)
@@ -301,36 +258,31 @@ title = "Test Site"
         assert "Post 1" in index_content
         assert "Post 2" in index_content
     
-    def test_site_generate_format_wrapper(self, tmp_path):
+    def test_site_generate_format_wrapper(self, site_structure_paths, sample_config_toml, tmp_path):
         """Test the _generate_format wrapper method."""
-        # Create site structure
-        site_path = tmp_path / "site"
-        site_path.mkdir()
-        (site_path / "content").mkdir()
-        (site_path / "templates").mkdir()
+        # Create site structure using fixture
+        paths = site_structure_paths
+        paths['site'].mkdir()
+        paths['content'].mkdir()
+        paths['templates'].mkdir()
         
         # Create config
-        config_path = site_path / "config.toml"
-        config_path.write_text("""
-[site]
-title = "Test Site"
-""")
+        config_path = paths['site'] / "config.toml"
+        config_path.write_text(sample_config_toml)
         
         # Create basic template
-        template_path = site_path / "templates" / "default.html"
-        template_path.write_text("""
-<!DOCTYPE html>
+        template_path = paths['templates'] / "default.html"
+        template_path.write_text("""<!DOCTYPE html>
 <html>
 <head><title>{{ page.title }}</title></head>
 <body>{{ page.content | safe }}</body>
-</html>
-""")
+</html>""")
         
         # Create test markdown
         test_md = tmp_path / "test.md"
         test_md.write_text("# Test\n\nContent")
         
-        site = Site(site_path)
+        site = Site(paths['site'])
         
         page_data = {
             'title': 'Test Page',
@@ -350,25 +302,22 @@ title = "Test Site"
         assert '<title>Test Page</title>' in html_content
         assert '<h1>Test</h1>' in html_content
     
-    def test_site_process_content_wrapper(self, tmp_path):
+    def test_site_process_content_wrapper(self, site_structure_paths, sample_config_toml):
         """Test the _process_content wrapper method."""
-        # Create site structure
-        site_path = tmp_path / "site"
-        site_path.mkdir()
-        (site_path / "content").mkdir()
-        (site_path / "templates").mkdir()
+        # Create site structure using fixture
+        paths = site_structure_paths
+        paths['site'].mkdir()
+        paths['content'].mkdir()
+        paths['templates'].mkdir()
         
         # Create config
-        config_path = site_path / "config.toml"
-        config_path.write_text("""
-[site]
-title = "Test Site"
-""")
+        config_path = paths['site'] / "config.toml"
+        config_path.write_text(sample_config_toml)
         
-        site = Site(site_path)
+        site = Site(paths['site'])
         
         # Create test file
-        test_file = site_path / "content" / "test.md"
+        test_file = paths['content'] / "test.md"
         test_file.write_text("""---
 title: Test Page
 layout: custom
