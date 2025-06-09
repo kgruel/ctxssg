@@ -1,14 +1,110 @@
 """Core static site generator functionality."""
 
-import os
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Any
 import yaml
 import frontmatter
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 import pypandoc
 from datetime import datetime
+import re
+from bs4 import BeautifulSoup
+import sys
+
+# TOML support for configuration
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+
+def check_dependencies() -> None:
+    """Check that all required dependencies are available."""
+    try:
+        import pypandoc
+        pypandoc.get_pandoc_version()
+    except OSError:
+        raise RuntimeError(
+            "Pandoc is required but not installed.\n"
+            "Please install from: https://pandoc.org/installing.html"
+        )
+    except Exception as e:
+        raise RuntimeError(f"Error checking pandoc installation: {e}")
+
+
+class ResourceLoader:
+    """Smart resource loading with fallback handling for package resources."""
+    
+    def __init__(self, package_name: str = 'ctxssg'):
+        self.package = package_name
+        self.package_path = Path(__file__).parent
+        
+    def load_resource(self, resource_path: str, fallback: str = '') -> str:
+        """Load a resource file from the package with optional fallback."""
+        full_path = self.package_path / resource_path
+        
+        if full_path.exists():
+            try:
+                return full_path.read_text(encoding='utf-8')
+            except Exception as e:
+                if fallback:
+                    return fallback
+                raise RuntimeError(f"Failed to read resource {resource_path}: {e}")
+        elif fallback:
+            return fallback
+        else:
+            raise FileNotFoundError(f"Resource not found: {resource_path}")
+    
+    def resource_exists(self, resource_path: str) -> bool:
+        """Check if a resource exists in the package."""
+        return (self.package_path / resource_path).exists()
+    
+    def copy_resource(self, resource_path: str, destination: Path, 
+                     overwrite: bool = False) -> bool:
+        """Copy a single resource file to destination."""
+        source_path = self.package_path / resource_path
+        
+        if not source_path.exists():
+            return False
+            
+        if destination.exists() and not overwrite:
+            return False
+            
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, destination)
+            return True
+        except Exception:
+            return False
+    
+    def copy_tree(self, source_dir: str, destination: Path, 
+                  overwrite: bool = False) -> List[Path]:
+        """Copy a directory tree from package resources."""
+        source_path = self.package_path / source_dir
+        copied_files = []
+        
+        if not source_path.exists() or not source_path.is_dir():
+            return copied_files
+            
+        for source_file in source_path.rglob('*'):
+            if source_file.is_file():
+                relative_path = source_file.relative_to(source_path)
+                dest_file = destination / relative_path
+                
+                if not dest_file.exists() or overwrite:
+                    dest_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_file, dest_file)
+                    copied_files.append(dest_file)
+                    
+        return copied_files
+        
+    def format_template(self, template_content: str, **kwargs) -> str:
+        """Format a template string with the provided kwargs."""
+        try:
+            return template_content.format(**kwargs)
+        except KeyError as e:
+            raise ValueError(f"Missing template variable: {e}")
 
 
 class Site:
@@ -23,29 +119,84 @@ class Site:
         self.output_dir = self.root / self.config.get("output_dir", "_site")
         
         # Initialize Jinja2 environment
+        # Add both site templates and package templates
+        template_paths = [str(self.templates_dir)]
+        
+        # Add package templates as fallback (formats and CSS)
+        package_templates_dir = Path(__file__).parent / "templates"
+        if package_templates_dir.exists():
+            template_paths.append(str(package_templates_dir))
+        
         self.env = Environment(
-            loader=FileSystemLoader(str(self.templates_dir)),
+            loader=FileSystemLoader(template_paths),
             autoescape=select_autoescape(['html', 'xml'])
         )
         
     def _load_config(self) -> Dict[str, Any]:
-        """Load site configuration from config.yaml."""
-        config_path = self.root / "config.yaml"
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                return yaml.safe_load(f) or {}
-        return {}
+        """Load site configuration from config.toml or config.yaml."""
+        # Try TOML first (preferred), then YAML for backward compatibility
+        toml_path = self.root / "config.toml"
+        yaml_path = self.root / "config.yaml"
+        
+        if toml_path.exists():
+            with open(toml_path, 'rb') as f:
+                config = tomllib.load(f)
+                return self._normalize_config(config)
+        elif yaml_path.exists():
+            with open(yaml_path, 'r') as f:
+                config = yaml.safe_load(f) or {}
+                return self._normalize_config(config)
+        
+        return self._get_default_config()
     
-    def build(self):
+    def _normalize_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize configuration to internal format."""
+        # Handle TOML nested structure vs flat YAML structure
+        if 'site' in config:
+            # TOML format with sections
+            normalized = {}
+            # Flatten site section to root
+            normalized.update(config.get('site', {}))
+            # Add build settings
+            normalized.update(config.get('build', {}))
+            # Add template settings
+            if 'templates' in config:
+                normalized['template_config'] = config['templates']
+            # Add format-specific settings
+            if 'formats' in config:
+                normalized['format_config'] = config['formats']
+            # Add CSS settings
+            if 'css' in config:
+                normalized['css'] = config['css']
+            return normalized
+        else:
+            # YAML format (flat) or legacy TOML
+            return config
+    
+    def _get_default_config(self) -> Dict[str, Any]:
+        """Get default configuration when no config file exists."""
+        return {
+            'title': 'My Site',
+            'url': 'http://localhost:8000',
+            'description': 'A static site generated with ctxssg',
+            'author': 'Your Name',
+            'output_dir': '_site',
+            'output_formats': ['html'],
+        }
+    
+    def build(self) -> None:
         """Build the entire site."""
         # Clean output directory
         if self.output_dir.exists():
             shutil.rmtree(self.output_dir)
         self.output_dir.mkdir(parents=True)
         
-        # Copy static files
+        # Copy static files first (but we'll override CSS)
         if self.static_dir.exists():
             shutil.copytree(self.static_dir, self.output_dir / "static")
+        
+        # Process CSS with priority system (may override copied CSS)
+        self._process_css()
         
         # Get output formats from config (default to HTML only)
         output_formats = self.config.get('output_formats', ['html'])
@@ -61,7 +212,9 @@ class Site:
             relative_path = content_file.relative_to(self.content_dir)
             if relative_path.parts[0] == "posts":
                 posts.append(page_data)
-                output_base = self.output_dir / "posts" / relative_path.with_suffix('')
+                # Remove the 'posts' part since we want posts/<filename>, not posts/posts/<filename>
+                post_relative = Path(*relative_path.parts[1:])
+                output_base = self.output_dir / "posts" / post_relative.with_suffix('')
             else:
                 pages.append(page_data)
                 output_base = self.output_dir / relative_path.with_suffix('')
@@ -73,8 +226,8 @@ class Site:
         # Generate index page
         self._generate_index(posts, pages)
     
-    def _generate_format(self, page_data: Dict[str, Any], source_file: Path, output_base: Path, fmt: str):
-        """Generate output file for a specific format."""
+    def _generate_format(self, page_data: Dict[str, Any], source_file: Path, output_base: Path, fmt: str) -> None:
+        """Generate output file for a specific format using templates."""
         # Ensure output directory exists
         output_base.parent.mkdir(parents=True, exist_ok=True)
         
@@ -84,103 +237,130 @@ class Site:
             output_path = output_base.with_suffix('.html')
             output_path.write_text(html)
         
-        elif fmt == 'plain' or fmt == 'txt':
-            # Generate enhanced plain text version
+        elif fmt in ['plain', 'txt']:
+            # Use template-based plain text generation
             post = frontmatter.load(source_file)
-            plain_content = pypandoc.convert_text(
-                post.content,
-                'plain',
-                format='markdown',
-                extra_args=['--wrap=none']
+            
+            # Get format-specific configuration
+            plain_config = self.config.get('format_config', {}).get('plain', {})
+            wrap_width = plain_config.get('wrap_width', 0)  # 0 means no wrap
+            include_metadata = plain_config.get('include_metadata', True)
+            
+            # Generate plain text content using pandoc
+            try:
+                extra_args = []
+                if wrap_width > 0:
+                    extra_args.append('--wrap=auto')  # Pandoc expects 'auto', 'none', or 'preserve'
+                else:
+                    extra_args.append('--wrap=none')
+                
+                plain_content = pypandoc.convert_text(
+                    post.content,
+                    'plain',
+                    format='markdown',
+                    extra_args=extra_args
+                )
+            except OSError as e:
+                if "pandoc" in str(e).lower():
+                    raise RuntimeError("Pandoc is not installed. Please install pandoc: https://pandoc.org/installing.html")
+                raise
+            except Exception as e:
+                raise RuntimeError(f"Failed to convert markdown to plain text: {e}")
+            
+            # Prepare metadata for template
+            metadata = {}
+            if include_metadata:
+                for key, value in page_data.items():
+                    if key not in ['content', 'url'] and value is not None:
+                        if hasattr(value, 'isoformat'):
+                            value = value.isoformat()
+                        metadata[key] = value
+            
+            # Render using template
+            template = self.env.get_template('formats/document.txt.j2')
+            content = template.render(
+                metadata=metadata if include_metadata else {},
+                plain_content=plain_content,
+                include_metadata=include_metadata
             )
-            
-            # Build metadata section
-            metadata_lines = ["METADATA:"]
-            for key, value in page_data.items():
-                if key not in ['content', 'url'] and value is not None:
-                    metadata_lines.append(f"{key.title()}: {value}")
-            
-            # Combine sections
-            full_content = "\n".join(metadata_lines) + "\n\nCONTENT:\n" + "="*80 + "\n\n" + plain_content
             
             output_path = output_base.with_suffix('.txt')
-            output_path.write_text(full_content)
+            output_path.write_text(content)
         
         elif fmt == 'xml':
-            # Generate clean semantic XML version
-            post = frontmatter.load(source_file)
+            # Use template-based XML generation
+            # Get format-specific configuration
+            xml_config = self.config.get('format_config', {}).get('xml', {})
+            include_namespaces = xml_config.get('include_namespaces', False)
             
-            # Build metadata section
-            metadata_xml = []
-            for key, value in page_data.items():
-                if key not in ['content', 'url'] and value is not None:
-                    metadata_xml.append(f"    <{key}>{self._escape_xml(str(value))}</{key}>")
+            # Parse HTML content into structured format
+            content_structure = self._parse_content_structure(page_data['content'])
             
-            # Convert content to HTML first, then parse for clean structure
-            html_content = pypandoc.convert_text(
-                post.content,
-                'html',
-                format='markdown'
-            )
-            
-            # Parse HTML into clean XML structure
-            content_xml = self._html_to_clean_xml(html_content)
-            
-            # Build complete XML document
-            xml_doc = f'''<?xml version="1.0" encoding="UTF-8"?>
-<document>
-  <meta>
-{chr(10).join(metadata_xml)}
-  </meta>
-  <content>
-{content_xml}
-  </content>
-</document>'''
-            
-            output_path = output_base.with_suffix('.xml')
-            output_path.write_text(xml_doc)
-        
-        elif fmt == 'json':
-            # Generate JSON version
-            import json
-            post = frontmatter.load(source_file)
-            
-            # Build metadata
+            # Prepare metadata for template
             metadata = {}
             for key, value in page_data.items():
                 if key not in ['content', 'url'] and value is not None:
-                    # Convert datetime objects to strings
                     if hasattr(value, 'isoformat'):
                         value = value.isoformat()
                     metadata[key] = value
             
-            # Convert content to HTML first, then parse for structured data
-            html_content = pypandoc.convert_text(
-                post.content,
-                'html',
-                format='markdown'
+            # Render using template
+            template = self.env.get_template('formats/document.xml.j2')
+            content = template.render(
+                metadata=metadata,
+                content=content_structure,
+                include_namespaces=include_namespaces
             )
             
-            # Parse HTML into structured content
-            structured_content = self._html_to_structured_data(html_content)
+            output_path = output_base.with_suffix('.xml')
+            output_path.write_text(content)
+        
+        elif fmt == 'json':
+            # Use template-based JSON generation
+            # Get format-specific configuration
+            json_config = self.config.get('format_config', {}).get('json', {})
+            pretty_print = json_config.get('pretty_print', True)
+            include_metadata = json_config.get('include_metadata', True)
             
-            # Build JSON document
-            json_doc = {
-                "metadata": metadata,
-                "content": structured_content
-            }
+            # Parse HTML content into structured format
+            content_structure = self._parse_content_structure(page_data['content'])
+            
+            # Prepare metadata for template
+            metadata = {}
+            if include_metadata:
+                for key, value in page_data.items():
+                    if key not in ['content', 'url'] and value is not None:
+                        if hasattr(value, 'isoformat'):
+                            value = value.isoformat()
+                        metadata[key] = value
+            
+            # Render using template
+            template = self.env.get_template('formats/document.json.j2')
+            content = template.render(
+                metadata=metadata if include_metadata else {},
+                content=content_structure,
+                pretty_print=pretty_print,
+                include_metadata=include_metadata
+            )
             
             output_path = output_base.with_suffix('.json')
-            output_path.write_text(json.dumps(json_doc, indent=2, ensure_ascii=False))
+            output_path.write_text(content)
         
         else:
             # Generic pandoc conversion for other formats
             post = frontmatter.load(source_file)
-            converted_content = pypandoc.convert_text(
-                post.content,
-                fmt,
-                format='markdown'
-            )
+            try:
+                converted_content = pypandoc.convert_text(
+                    post.content,
+                    fmt,
+                    format='markdown'
+                )
+            except OSError as e:
+                if "pandoc" in str(e).lower():
+                    raise RuntimeError("Pandoc is not installed. Please install pandoc: https://pandoc.org/installing.html")
+                raise
+            except Exception as e:
+                raise RuntimeError(f"Failed to convert markdown to {fmt} format: {e}")
             
             output_path = output_base.with_suffix(f'.{fmt}')
             output_path.write_text(converted_content)
@@ -190,12 +370,23 @@ class Site:
         post = frontmatter.load(file_path)
         
         # Convert markdown to HTML using pandoc
-        html_content = pypandoc.convert_text(
-            post.content,
-            'html',
-            format='markdown',
-            extra_args=['--highlight-style=pygments']
-        )
+        try:
+            html_content = pypandoc.convert_text(
+                post.content,
+                'html',
+                format='markdown',
+                extra_args=['--highlight-style=pygments']
+            )
+            
+            # Remove automatically generated header IDs for cleaner HTML
+            import re
+            html_content = re.sub(r'(<h[1-6])\s+id="[^"]*"', r'\1', html_content)
+        except OSError as e:
+            if "pandoc" in str(e).lower():
+                raise RuntimeError("Pandoc is not installed. Please install pandoc: https://pandoc.org/installing.html")
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Failed to convert markdown to HTML: {e}")
         
         # Build page data
         page_data = {
@@ -214,6 +405,104 @@ class Site:
         relative_path = file_path.relative_to(self.content_dir).with_suffix('.html')
         return f"/{relative_path.as_posix()}"
     
+    def _parse_content_structure(self, html_content: str) -> Dict[str, Any]:
+        """Parse HTML content into structured data for templating."""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        sections = []
+        current_section = None
+        
+        for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'ul', 'ol', 'pre', 'blockquote']):
+            if element.name.startswith('h'):
+                # Start new section
+                if current_section:
+                    sections.append(current_section)
+                
+                level = int(element.name[1])
+                section_id = element.get('id') or self._generate_id(element.get_text())
+                
+                current_section = {
+                    'id': section_id,
+                    'level': level,
+                    'title': element.get_text().strip(),
+                    'content': []
+                }
+            elif current_section:
+                # Add content to current section
+                if element.name == 'p':
+                    current_section['content'].append({
+                        'type': 'paragraph',
+                        'text': self._clean_html(element)
+                    })
+                elif element.name in ['ul', 'ol']:
+                    list_items = [self._clean_html(li) for li in element.find_all('li')]
+                    current_section['content'].append({
+                        'type': 'list',
+                        'list_type': 'ordered' if element.name == 'ol' else 'bullet',
+                        'items': list_items
+                    })
+                elif element.name == 'pre':
+                    code_element = element.find('code')
+                    if code_element:
+                        language = None
+                        if code_element.get('class'):
+                            for cls in code_element.get('class'):
+                                if cls.startswith('sourceCode'):
+                                    continue
+                                if cls.startswith('language-'):
+                                    language = cls[9:]
+                                else:
+                                    language = cls
+                                break
+                        
+                        current_section['content'].append({
+                            'type': 'code',
+                            'language': language,
+                            'text': code_element.get_text()
+                        })
+                    else:
+                        current_section['content'].append({
+                            'type': 'code',
+                            'language': None,
+                            'text': element.get_text()
+                        })
+                elif element.name == 'blockquote':
+                    current_section['content'].append({
+                        'type': 'quote',
+                        'text': self._clean_html(element)
+                    })
+        
+        # Add the last section
+        if current_section:
+            sections.append(current_section)
+        
+        # If no sections were found, create a default section
+        if not sections:
+            sections.append({
+                'id': 'content',
+                'level': 1,
+                'title': 'Content',
+                'content': [{
+                    'type': 'paragraph',
+                    'text': self._clean_html(soup)
+                }]
+            })
+        
+        return {'sections': sections}
+    
+    
+    def _generate_id(self, text: str) -> str:
+        """Generate a URL-safe ID from text."""
+        # Convert to lowercase and replace spaces/special chars with hyphens
+        id_text = re.sub(r'[^\w\s-]', '', text.lower())
+        id_text = re.sub(r'[-\s]+', '-', id_text)
+        return id_text.strip('-')
+    
+    def _clean_html(self, element) -> str:
+        """Extract clean text from HTML element, preserving basic formatting."""
+        if hasattr(element, 'get_text'):
+            return element.get_text().strip()
+        return str(element).strip()
+    
     def _render_page(self, page_data: Dict[str, Any]) -> str:
         """Render a page using Jinja2 templates."""
         layout = page_data.get('layout', 'default')
@@ -227,7 +516,7 @@ class Site:
         
         return template.render(**context)
     
-    def _generate_index(self, posts: List[Dict[str, Any]], pages: List[Dict[str, Any]]):
+    def _generate_index(self, posts: List[Dict[str, Any]], pages: List[Dict[str, Any]]) -> None:
         """Generate the index page."""
         # Sort posts by date (newest first)
         posts.sort(key=lambda x: x.get('date', datetime.min), reverse=True)
@@ -242,161 +531,86 @@ class Site:
         html = self._render_page(index_data)
         (self.output_dir / 'index.html').write_text(html)
     
-    def _escape_xml(self, text):
-        """Escape XML special characters."""
-        return (str(text)
-                .replace('&', '&amp;')
-                .replace('<', '&lt;')
-                .replace('>', '&gt;')
-                .replace('"', '&quot;')
-                .replace("'", '&apos;'))
+    def _process_css(self) -> None:
+        """Simple CSS processing: user CSS > default CSS."""
+        css_output_dir = self.output_dir / "static" / "css"
+        css_output_dir.mkdir(parents=True, exist_ok=True)
+        output_css_path = css_output_dir / "style.css"
+        
+        # Priority 1: User's CSS file (if it exists)
+        user_css_path = self.static_dir / "css" / "style.css"
+        if user_css_path.exists():
+            shutil.copy2(user_css_path, output_css_path)
+            return
+        
+        # Priority 2: Use default CSS
+        self._use_default_css(output_css_path)
     
-    def _html_to_clean_xml(self, html_content):
-        """Convert HTML to clean semantic XML."""
-        from bs4 import BeautifulSoup
-        import re
+    def _use_default_css(self, output_path: Path) -> None:
+        """Use the enhanced default CSS as fallback."""
+        loader = ResourceLoader()
         
-        soup = BeautifulSoup(html_content, 'html.parser')
-        xml_parts = []
+        # Try to load from package assets
+        if loader.copy_resource('assets/css/default.css', output_path):
+            return
         
-        for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'ul', 'ol', 'pre', 'blockquote']):
-            if element.name.startswith('h'):
-                # Header element
-                level = int(element.name[1])
-                title = element.get_text().strip()
-                # Create ID from title
-                id_attr = re.sub(r'[^a-zA-Z0-9\s-]', '', title).strip().lower().replace(' ', '-')
-                xml_parts.append(f'    <section id="{id_attr}" level="{level}">')
-                xml_parts.append(f'      <title>{self._escape_xml(title)}</title>')
-                
-            elif element.name == 'p':
-                text = element.get_text().strip()
-                if text:
-                    xml_parts.append(f'      <paragraph>{self._escape_xml(text)}</paragraph>')
-                    
-            elif element.name in ['ul', 'ol']:
-                list_type = 'ordered' if element.name == 'ol' else 'bullet'
-                xml_parts.append(f'      <list type="{list_type}">')
-                for li in element.find_all('li'):
-                    item_text = li.get_text().strip()
-                    xml_parts.append(f'        <item>{self._escape_xml(item_text)}</item>')
-                xml_parts.append('      </list>')
-                
-            elif element.name == 'pre':
-                code_elem = element.find('code')
-                if code_elem:
-                    # Extract language from class if present
-                    language = ''
-                    if code_elem.get('class'):
-                        for cls in code_elem.get('class'):
-                            if cls.startswith('language-'):
-                                language = cls.replace('language-', '')
-                                break
-                    
-                    code_text = code_elem.get_text()
-                    lang_attr = f' language="{language}"' if language else ''
-                    xml_parts.append(f'      <code{lang_attr}>{self._escape_xml(code_text)}</code>')
-                else:
-                    xml_parts.append(f'      <code>{self._escape_xml(element.get_text())}</code>')
-                    
-            elif element.name == 'blockquote':
-                text = element.get_text().strip()
-                xml_parts.append(f'      <quote>{self._escape_xml(text)}</quote>')
-        
-        # Close any open sections
-        if xml_parts and any('section' in part for part in xml_parts):
-            xml_parts.append('    </section>')
-        
-        return '\n'.join(xml_parts)
+        # Fallback to basic CSS if default.css is missing
+        self._create_fallback_css(output_path)
     
-    def _html_to_structured_data(self, html_content):
-        """Convert HTML to structured data for JSON output."""
-        from bs4 import BeautifulSoup
-        import re
-        
-        soup = BeautifulSoup(html_content, 'html.parser')
-        sections = []
-        current_section = None
-        
-        for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'ul', 'ol', 'pre', 'blockquote']):
-            if element.name.startswith('h'):
-                # Start new section
-                if current_section:
-                    sections.append(current_section)
-                
-                level = int(element.name[1])
-                title = element.get_text().strip()
-                # Create ID from title
-                id_attr = re.sub(r'[^a-zA-Z0-9\s-]', '', title).strip().lower().replace(' ', '-')
-                
-                current_section = {
-                    'id': id_attr,
-                    'level': level,
-                    'title': title,
-                    'content': []
-                }
-                
-            elif current_section:
-                if element.name == 'p':
-                    text = element.get_text().strip()
-                    if text:
-                        current_section['content'].append({
-                            'type': 'paragraph',
-                            'text': text
-                        })
-                        
-                elif element.name in ['ul', 'ol']:
-                    list_type = 'ordered' if element.name == 'ol' else 'bullet'
-                    items = [li.get_text().strip() for li in element.find_all('li')]
-                    current_section['content'].append({
-                        'type': 'list',
-                        'style': list_type,
-                        'items': items
-                    })
-                    
-                elif element.name == 'pre':
-                    code_elem = element.find('code')
-                    if code_elem:
-                        # Extract language from class if present
-                        language = ''
-                        if code_elem.get('class'):
-                            for cls in code_elem.get('class'):
-                                if cls.startswith('language-'):
-                                    language = cls.replace('language-', '')
-                                    break
-                        
-                        code_data = {
-                            'type': 'code',
-                            'text': code_elem.get_text()
-                        }
-                        if language:
-                            code_data['language'] = language
-                        current_section['content'].append(code_data)
-                    else:
-                        current_section['content'].append({
-                            'type': 'code',
-                            'text': element.get_text()
-                        })
-                        
-                elif element.name == 'blockquote':
-                    current_section['content'].append({
-                        'type': 'quote',
-                        'text': element.get_text().strip()
-                    })
-        
-        # Add the last section
-        if current_section:
-            sections.append(current_section)
-        
-        return {'sections': sections}
+    def _create_fallback_css(self, output_path: Path) -> None:
+        """Create a basic fallback CSS if all else fails."""
+        basic_css = '''/* Basic fallback CSS for ctxssg */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.6;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+    color: #333;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    margin-top: 2rem;
+    margin-bottom: 1rem;
+    line-height: 1.3;
+}
+
+a {
+    color: #0066cc;
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+pre {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 4px;
+    padding: 1rem;
+    overflow-x: auto;
+}
+
+code {
+    font-family: monospace;
+    background: #f8f9fa;
+    padding: 0.2em 0.4em;
+    border-radius: 3px;
+}
+'''
+        output_path.write_text(basic_css)
+    
 
 
 class SiteGenerator:
     """Main interface for generating static sites."""
     
     @staticmethod
-    def init_site(path: Path, title: str = "My Site"):
-        """Initialize a new site structure."""
+    def init_site(path: Path, title: str = "My Site") -> None:
+        """Initialize a new site structure using package resources."""
+        loader = ResourceLoader()
+        
         # Create directory structure
         (path / "content").mkdir(parents=True, exist_ok=True)
         (path / "content" / "posts").mkdir(exist_ok=True)
@@ -405,176 +619,115 @@ class SiteGenerator:
         (path / "static" / "css").mkdir(exist_ok=True)
         (path / "static" / "js").mkdir(exist_ok=True)
         
-        # Create default config
-        config = {
-            'title': title,
-            'url': 'http://localhost:8000',
-            'description': 'A static site generated with ctxssg',
-            'author': 'Your Name',
-            'output_dir': '_site',
-            'output_formats': ['html', 'plain', 'xml', 'json'],
-        }
+        # Create config.toml from template
+        config_template = loader.load_resource(
+            'templates/site/config/config.toml',
+            fallback=SiteGenerator._get_fallback_config()
+        )
+        config_content = loader.format_template(config_template, title=title)
+        (path / "config.toml").write_text(config_content)
         
-        with open(path / "config.yaml", 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
+        # Copy HTML templates
+        loader.copy_tree('templates/site/html', path / "templates")
         
-        # Create default templates
-        SiteGenerator._create_default_templates(path / "templates")
+        # Copy format templates
+        formats_dir = path / "templates" / "formats"
+        formats_dir.mkdir(exist_ok=True)
+        loader.copy_tree('templates/formats', formats_dir)
         
-        # Create sample content
-        SiteGenerator._create_sample_content(path / "content")
+        # Copy sample content
+        about_md = loader.load_resource(
+            'templates/site/content/about.md',
+            fallback=SiteGenerator._get_fallback_about()
+        )
+        (path / "content" / "about.md").write_text(about_md)
         
-        # Copy default CSS
-        SiteGenerator._create_default_css(path / "static" / "css")
+        welcome_md = loader.load_resource(
+            'templates/site/content/welcome.md',
+            fallback=SiteGenerator._get_fallback_welcome()
+        )
+        (path / "content" / "posts" / "welcome.md").write_text(welcome_md)
         
-    @staticmethod
-    def _create_default_templates(templates_dir: Path):
-        """Create default template files."""
-        # Base template
-        base_template = '''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ page.title }} - {{ site.title }}</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <header>
-        <h1><a href="/">{{ site.title }}</a></h1>
-        <nav>
-            <a href="/">Home</a>
-            <a href="/about.html">About</a>
-        </nav>
-    </header>
-    
-    <main>
-        {% block content %}{% endblock %}
-    </main>
-    
-    <footer>
-        <p>&copy; {{ site.author }} - Built with ctxssg</p>
-    </footer>
-</body>
-</html>'''
-        
-        (templates_dir / "base.html").write_text(base_template)
-        
-        # Default page template
-        default_template = '''{% extends "base.html" %}
-
-{% block content %}
-<article>
-    <h1>{{ page.title }}</h1>
-    {{ page.content | safe }}
-</article>
-{% endblock %}'''
-        
-        (templates_dir / "default.html").write_text(default_template)
-        
-        # Index template
-        index_template = '''{% extends "base.html" %}
-
-{% block content %}
-<div class="home">
-    <h2>Recent Posts</h2>
-    <ul class="post-list">
-        {% for post in page.posts %}
-        <li>
-            <span class="post-date">{{ post.date.strftime('%Y-%m-%d') }}</span>
-            <a href="{{ post.url }}">{{ post.title }}</a>
-        </li>
-        {% endfor %}
-    </ul>
-</div>
-{% endblock %}'''
-        
-        (templates_dir / "index.html").write_text(index_template)
-        
-        # Post template
-        post_template = '''{% extends "base.html" %}
-
-{% block content %}
-<article class="post">
-    <header>
-        <h1>{{ page.title }}</h1>
-        <time datetime="{{ page.date }}">{{ page.date.strftime('%B %d, %Y') }}</time>
-    </header>
-    
-    <div class="post-content">
-        {{ page.content | safe }}
-    </div>
-</article>
-{% endblock %}'''
-        
-        (templates_dir / "post.html").write_text(post_template)
+        # Copy default CSS to static directory
+        css_path = path / "static" / "css" / "style.css"
+        if not loader.copy_resource('assets/css/default.css', css_path):
+            # Fallback CSS if package resource is missing
+            SiteGenerator._create_fallback_css(css_path)
     
     @staticmethod
-    def _create_sample_content(content_dir: Path):
-        """Create sample content files."""
-        # About page
-        about_content = '''---
+    def _get_fallback_config() -> str:
+        """Minimal fallback config if resource loading fails."""
+        return '''[site]
+title = "{title}"
+url = "http://localhost:8000"
+
+[build]
+output_dir = "_site"
+output_formats = ["html"]'''
+    
+    @staticmethod
+    def _get_fallback_about() -> str:
+        """Minimal fallback about page."""
+        return '''---
 title: About
 layout: default
 ---
 
 # About This Site
 
-This is a static site generated with ctxssg, a pandoc-based static site generator.
-
-## Features
-
-- Markdown content with YAML frontmatter
-- Pandoc for powerful document conversion
-- Jinja2 templates
-- Simple and fast
-'''
-        
-        (content_dir / "about.md").write_text(about_content)
-        
-        # Sample post
-        post_content = '''---
-title: Welcome to ctxssg
+This site was generated with ctxssg.'''
+    
+    @staticmethod
+    def _get_fallback_welcome() -> str:
+        """Minimal fallback welcome post."""
+        return '''---
+title: Welcome
 date: 2024-01-01
 layout: post
 ---
 
-Welcome to your new static site! This post was generated automatically when you initialized your site.
-
-## Getting Started
-
-1. Add your content as Markdown files in the `content` directory
-2. Customize templates in the `templates` directory
-3. Add static assets to the `static` directory
-4. Build your site with `ctxssg build`
-
-Happy writing!
-'''
-        
-        (content_dir / "posts" / "welcome.md").write_text(post_content)
+Welcome to your new site!'''
     
     @staticmethod
-    def _create_default_css(css_dir: Path):
-        """Copy default CSS to the static directory."""
-        from importlib.resources import read_text
-        import ctxssg
-        
-        try:
-            # Try to read from package resources
-            css_content = read_text(ctxssg, 'default_style.css')
-        except:
-            # Fallback to reading from file
-            css_file = Path(__file__).parent / 'default_style.css'
-            if css_file.exists():
-                css_content = css_file.read_text()
-            else:
-                # Inline minimal CSS if file not found
-                css_content = '''/* Minimal default CSS */
-body { font-family: -apple-system, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 1rem; }
-h1, h2, h3 { margin-top: 1.5rem; }
-a { color: #0066cc; }
-pre { background: #f5f5f5; padding: 1rem; overflow-x: auto; }
-code { font-family: monospace; background: #f5f5f5; padding: 0.2em 0.4em; }
-'''
-        
-        (css_dir / "style.css").write_text(css_content)
+    def _create_fallback_css(output_path: Path) -> None:
+        """Create basic fallback CSS as last resort."""
+        css_content = '''/* Basic fallback CSS for ctxssg */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.6;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+    color: #333;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    margin-top: 2rem;
+    margin-bottom: 1rem;
+    line-height: 1.3;
+}
+
+a {
+    color: #0066cc;
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+pre {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 4px;
+    padding: 1rem;
+    overflow-x: auto;
+}
+
+code {
+    font-family: monospace;
+    background: #f8f9fa;
+    padding: 0.2em 0.4em;
+    border-radius: 3px;
+}'''
+        output_path.write_text(css_content)

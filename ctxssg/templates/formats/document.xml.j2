@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document>
+    <meta>
+        {% for key, value in metadata.items() %}
+        <{{ key }}>{{ value }}</{{ key }}>
+        {% endfor %}
+    </meta>
+    
+    {% for section in content.sections %}
+    <section id="{{ section.id }}" level="{{ section.level }}">
+        <title>{{ section.title }}</title>
+        {% for paragraph in section.content %}
+        {% if paragraph.type == 'paragraph' %}
+        <paragraph>{{ paragraph.text }}</paragraph>
+        {% elif paragraph.type == 'list' %}
+        <list type="{{ paragraph.list_type }}">
+            {% for item in paragraph['items'] %}
+            <item>{{ item }}</item>
+            {% endfor %}
+        </list>
+        {% elif paragraph.type == 'code' %}
+        <code{% if paragraph.language %} language="{{ paragraph.language }}"{% endif %}>{{ paragraph.text }}</code>
+        {% elif paragraph.type == 'quote' %}
+        <quote>{{ paragraph.text }}</quote>
+        {% endif %}
+        {% endfor %}
+    </section>
+    {% endfor %}
+</document>

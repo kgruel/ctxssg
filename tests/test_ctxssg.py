@@ -1,4 +1,3 @@
-import pytest
 from pathlib import Path
 import tempfile
 import shutil
@@ -25,7 +24,7 @@ class TestSiteGenerator:
         SiteGenerator.init_site(site_path, "Test Site")
         
         # Check directory structure
-        assert (site_path / "config.yaml").exists()
+        assert (site_path / "config.toml").exists()
         assert (site_path / "content").exists()
         assert (site_path / "content" / "posts").exists()
         assert (site_path / "templates").exists()
@@ -289,7 +288,7 @@ class TestCLI:
             
             assert result.exit_code == 0
             assert "Site initialized successfully!" in result.output
-            assert Path("my_site/config.yaml").exists()
+            assert Path("my_site/config.toml").exists()
     
     def test_build_command(self, tmp_path):
         """Test the build command."""
@@ -332,7 +331,7 @@ class TestCLI:
             result = runner.invoke(cli, ['build'])
             
             assert result.exit_code == 1
-            assert "No config.yaml found" in result.output
+            assert "No config.toml or config.yaml found" in result.output
     
     def test_build_with_formats(self, tmp_path):
         """Test build command with specific formats."""

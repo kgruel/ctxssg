@@ -1,0 +1,24 @@
+# ctxssg Configuration File
+# A clean, focused configuration for your static site
+
+[site]
+title = "{title}"
+url = "http://localhost:8000"
+description = "A static site generated with ctxssg"
+author = "Your Name"
+
+[build]
+output_dir = "_site"
+output_formats = ["html", "xml", "plain", "json"]
+
+# Format-specific configuration (optional)
+[formats.json]
+pretty_print = true
+include_metadata = true
+
+[formats.xml]
+include_namespaces = false
+
+[formats.plain]
+include_metadata = true
+wrap_width = 80

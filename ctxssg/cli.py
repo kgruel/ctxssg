@@ -5,11 +5,46 @@ from pathlib import Path
 import http.server
 import socketserver
 import threading
+from typing import Optional, Callable
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from datetime import datetime
 
-from .generator import Site, SiteGenerator
+from .generator import Site, SiteGenerator, check_dependencies
+
+
+class RebuildHandler(FileSystemEventHandler):
+    """Shared file system event handler for rebuilding the site on changes."""
+    
+    def __init__(self, site: Site, rebuild_callback: Optional[Callable[[], None]] = None, success_message: str = "Site rebuilt") -> None:
+        self.site = site
+        self.rebuild_callback = rebuild_callback or self._default_rebuild
+        self.success_message = success_message
+        
+    def _default_rebuild(self) -> None:
+        """Default rebuild action - just build the site."""
+        self.site.build()
+        
+    def should_ignore(self, event) -> bool:
+        """Check if an event should be ignored."""
+        if event.is_directory:
+            return True
+        
+        # Ignore output directory and hidden files
+        path = Path(event.src_path)
+        if (str(self.site.output_dir) in str(path) or 
+            any(part.startswith('.') for part in path.parts)):
+            return True
+        
+        return False
+        
+    def on_modified(self, event) -> None:
+        """Handle file modification events."""
+        if self.should_ignore(event):
+            return
+        
+        click.echo(f"Detected change in {Path(event.src_path)}")
+        self.rebuild_callback()
 
 
 @click.group()
@@ -44,11 +79,19 @@ def init(path, title):
 @click.option('--formats', '-f', multiple=True, help='Output formats (html, plain, xml)')
 def build(watch, formats):
     """Build the static site."""
-    site_path = Path.cwd()
-    config_path = site_path / "config.yaml"
+    # Check dependencies first
+    try:
+        check_dependencies()
+    except RuntimeError as e:
+        click.secho(f"Dependency error: {e}", fg='red')
+        sys.exit(1)
     
-    if not config_path.exists():
-        click.secho("Error: No config.yaml found. Run 'ctxssg init' first.", fg='red')
+    site_path = Path.cwd()
+    toml_config_path = site_path / "config.toml"
+    yaml_config_path = site_path / "config.yaml"
+    
+    if not (toml_config_path.exists() or yaml_config_path.exists()):
+        click.secho("Error: No config.toml or config.yaml found. Run 'ctxssg init' first.", fg='red')
         sys.exit(1)
     
     site = Site(site_path)
@@ -72,21 +115,7 @@ def build(watch, formats):
     if watch:
         click.echo("Watching for changes...")
         
-        class RebuildHandler(FileSystemEventHandler):
-            def on_modified(self, event):
-                if event.is_directory:
-                    return
-                
-                # Ignore output directory and hidden files
-                path = Path(event.src_path)
-                if (str(site.output_dir) in str(path) or 
-                    any(part.startswith('.') for part in path.parts)):
-                    return
-                
-                click.echo(f"Detected change in {path}")
-                do_build()
-        
-        event_handler = RebuildHandler()
+        event_handler = RebuildHandler(site, do_build)
         observer = Observer()
         observer.schedule(event_handler, str(site_path), recursive=True)
         observer.start()
@@ -105,6 +134,14 @@ def build(watch, formats):
 @click.option('--watch', '-w', is_flag=True, help='Watch for changes and rebuild')
 def serve(port, watch):
     """Serve the built site locally."""
+    # Check dependencies first if we might need to rebuild
+    if watch:
+        try:
+            check_dependencies()
+        except RuntimeError as e:
+            click.secho(f"Dependency error: {e}", fg='red')
+            sys.exit(1)
+    
     site_path = Path.cwd()
     site = Site(site_path)
     
@@ -131,24 +168,15 @@ def serve(port, watch):
         # Start watcher in a separate thread
         os.chdir(site_path)
         
-        class RebuildHandler(FileSystemEventHandler):
-            def on_modified(self, event):
-                if event.is_directory:
-                    return
-                
-                path = Path(event.src_path)
-                if (str(site.output_dir) in str(path) or 
-                    any(part.startswith('.') for part in path.parts)):
-                    return
-                
-                click.echo(f"Detected change in {path}")
-                try:
-                    site.build()
-                    click.secho("Site rebuilt", fg='green')
-                except Exception as e:
-                    click.secho(f"Build error: {e}", fg='red')
+        def rebuild_with_feedback():
+            """Rebuild with success/error feedback."""
+            try:
+                site.build()
+                click.secho("Site rebuilt", fg='green')
+            except Exception as e:
+                click.secho(f"Build error: {e}", fg='red')
         
-        event_handler = RebuildHandler()
+        event_handler = RebuildHandler(site, rebuild_with_feedback)
         observer = Observer()
         observer.schedule(event_handler, str(site_path), recursive=True)
         observer.start()
@@ -169,14 +197,105 @@ def serve(port, watch):
 
 
 @cli.command()
+def doctor():
+    """Check system dependencies and configuration."""
+    click.echo("Checking system dependencies...")
+    
+    # Check pandoc
+    try:
+        check_dependencies()
+        import pypandoc
+        version = pypandoc.get_pandoc_version()
+        click.secho(f"✓ Pandoc: {version}", fg='green')
+    except RuntimeError as e:
+        click.secho(f"✗ Pandoc: {e}", fg='red')
+        return
+    except Exception as e:
+        click.secho(f"✗ Pandoc: Error checking version - {e}", fg='red')
+        return
+    
+    # Check Python dependencies
+    required_modules = [
+        ('click', 'Click'),
+        ('yaml', 'PyYAML'),
+        ('frontmatter', 'python-frontmatter'),
+        ('jinja2', 'Jinja2'),
+        ('watchdog', 'watchdog'),
+        ('bs4', 'BeautifulSoup4'),
+    ]
+    
+    # Check TOML support
+    try:
+        import sys
+        if sys.version_info >= (3, 11):
+            import tomllib  # noqa: F401
+            click.secho("✓ TOML support: built-in (Python 3.11+)", fg='green')
+        else:
+            import tomli  # noqa: F401
+            click.secho("✓ TOML support: tomli library", fg='green')
+    except ImportError:
+        click.secho("✗ TOML support: tomli library not installed", fg='red')
+    
+    for module, name in required_modules:
+        try:
+            __import__(module)
+            click.secho(f"✓ {name}: installed", fg='green')
+        except ImportError:
+            click.secho(f"✗ {name}: not installed", fg='red')
+    
+    # Check current directory structure
+    site_path = Path.cwd()
+    toml_config_path = site_path / "config.toml"
+    yaml_config_path = site_path / "config.yaml"
+    
+    click.echo("\nChecking site configuration...")
+    if toml_config_path.exists():
+        click.secho("✓ config.toml: found (preferred)", fg='green')
+        config_type = "TOML"
+    elif yaml_config_path.exists():
+        click.secho("✓ config.yaml: found (legacy)", fg='green')
+        config_type = "YAML"
+    else:
+        click.secho("✗ config file: not found (run 'ctxssg init' to create)", fg='yellow')
+        config_type = None
+    
+    if config_type:
+        try:
+            site = Site(site_path)
+            click.secho(f"✓ Configuration format: {config_type}", fg='green')
+            click.secho(f"✓ Site title: {site.config.get('title', 'Not set')}", fg='green')
+            click.secho(f"✓ Output directory: {site.config.get('output_dir', '_site')}", fg='green')
+            click.secho(f"✓ Output formats: {', '.join(site.config.get('output_formats', ['html']))}", fg='green')
+            
+            # Check for enhanced configuration features
+            if 'format_config' in site.config:
+                click.secho("✓ Enhanced format configuration: enabled", fg='green')
+            if 'template_config' in site.config:
+                click.secho("✓ Template configuration: enabled", fg='green')
+        except Exception as e:
+            click.secho(f"✗ Site configuration: {e}", fg='red')
+    
+    # Check directory structure
+    directories = ['content', 'templates', 'static']
+    for dir_name in directories:
+        dir_path = site_path / dir_name
+        if dir_path.exists():
+            click.secho(f"✓ {dir_name}/: found", fg='green')
+        else:
+            click.secho(f"✗ {dir_name}/: not found", fg='yellow')
+    
+    click.echo("\nDependency check complete!")
+
+
+@cli.command()
 @click.argument('title')
 @click.option('--type', '-t', type=click.Choice(['post', 'page']), default='post', help='Content type')
 def new(title, type):
     """Create a new post or page."""
     site_path = Path.cwd()
     
-    if not (site_path / "config.yaml").exists():
-        click.secho("Error: No config.yaml found. Run 'ctxssg init' first.", fg='red')
+    if not ((site_path / "config.toml").exists() or (site_path / "config.yaml").exists()):
+        click.secho("Error: No config.toml or config.yaml found. Run 'ctxssg init' first.", fg='red')
         sys.exit(1)
     
     # Generate filename from title

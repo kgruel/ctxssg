@@ -1,0 +1,13 @@
+{% if include_metadata and metadata %}
+METADATA:
+{% for key, value in metadata.items() %}
+{{ key.title() }}: {{ value }}
+{% endfor %}
+
+{% endif %}
+{% if include_metadata and metadata %}
+CONTENT:
+{{ "=" * 80 }}
+
+{% endif %}
+{{ plain_content }}

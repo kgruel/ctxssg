@@ -1,0 +1,32 @@
+{
+    "metadata": {{ metadata | tojson }},
+    "content": {
+        "sections": [
+            {% for section in content.sections %}
+            {
+                "id": {{ section.id | tojson }},
+                "level": {{ section.level }},
+                "title": {{ section.title | tojson }},
+                "content": [
+                    {% for paragraph in section.content %}
+                    {
+                        "type": {{ paragraph.type | tojson }},
+                        {% if paragraph.type == 'paragraph' %}
+                        "text": {{ paragraph.text | tojson }}
+                        {% elif paragraph.type == 'list' %}
+                        "style": {{ paragraph.list_type | tojson }},
+                        "items": {{ paragraph['items'] | tojson }}
+                        {% elif paragraph.type == 'code' %}
+                        "language": {{ paragraph.language | tojson }},
+                        "text": {{ paragraph.text | tojson }}
+                        {% elif paragraph.type == 'quote' %}
+                        "text": {{ paragraph.text | tojson }}
+                        {% endif %}
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                ]
+            }{% if not loop.last %},{% endif %}
+            {% endfor %}
+        ]
+    }
+}
